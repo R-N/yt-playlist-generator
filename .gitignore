@@ -4,3 +4,6 @@ playlists.txt
 dump.txt
 dump.csv
 ids.txt
+downloaded_ids.txt
+/downloads
+urls.txt
