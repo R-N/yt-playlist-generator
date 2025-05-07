@@ -7,13 +7,16 @@ import glob
 
 id_file_name = "ids.txt"
 download_folder = "downloads"
+downloaded_log_file = "downloaded_ids.txt"
+error_log_file = "error_ids.txt"
 
 def main():
   # Load list of all video IDs
   all_ids = pd.read_csv('ids.txt', header=None)[0].dropna().unique().tolist()
 
   # Log file to track completed downloads
-  log_file = Path('downloaded_ids.txt')
+  log_file = Path(downloaded_log_file)
+  error_file = Path(error_log_file)
 
   # Load completed IDs
   if log_file.exists():
@@ -38,7 +41,7 @@ def main():
   }
 
   Path(download_folder).mkdir(exist_ok=True)
-  with YoutubeDL(ydl_opts) as ydl, open(log_file, 'a') as log:
+  with YoutubeDL(ydl_opts) as ydl, open(log_file, 'a') as log, open(error_file, 'a') as error_log:
       for vid in to_download:
           url = f'https://www.youtube.com/watch?v={vid}'
           print(f"Downloading: {url}")
@@ -48,6 +51,8 @@ def main():
               log.flush()
           except Exception as e:
               print(f"Failed: {url} — {e}")
+              error_log.write(vid + '\n')
+              error_log.flush()
 
 if __name__ == '__main__':
     main()
