@@ -38,6 +38,17 @@ def main():
       'quiet': False,
       'noplaylist': True,
       'overwrites': False,
+      'max_filesize': None,  # Not limiting size directly
+      'match_filter': lambda info: (
+          "Skipping: too long" if info.get('duration', 0) > 1800 else None
+      ),
+      'sleep_interval': 5,
+      'max_sleep_interval': 10,
+      'postprocessors': [{
+          'key': 'FFmpegExtractAudio',
+          'preferredcodec': 'mp3',
+          'preferredquality': '160',
+      }],
   }
 
   Path(download_folder).mkdir(exist_ok=True)
