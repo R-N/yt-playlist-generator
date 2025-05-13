@@ -157,8 +157,12 @@ def score(entry, artist, query_title="", max_views=1, preferred_formats=["opus",
 
     if best_audio:
         ext = best_audio.get("ext", "").lower()
+        codec = best_audio.get("acodec", "").lower()
         if ext in preferred_formats:
             format_rank = preferred_formats.index(ext)
+            score += (len(preferred_formats) - format_rank) * 10
+        elif codec in preferred_formats:
+            format_rank = preferred_formats.index(codec)
             score += (len(preferred_formats) - format_rank) * 10
         else:
             score -= 25
