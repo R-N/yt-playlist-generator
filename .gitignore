@@ -11,5 +11,7 @@ error_ids.txt
 cookies.txt
 mp3_youtube_matches*.csv
 matches.csv
+matches*.csv
 sign_in.txt
 .ipynb_checkpoints/
+matches.xlsx

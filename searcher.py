@@ -20,25 +20,13 @@ YDL_OPTS = {
   #"ignoreerrors": True,
 }
 
-CONFIGS = [
-  {
-    "folder": "E:/Music/downloads",
-    "file": "mp3_youtube_matches_0.csv"
-  },
-  {
-    "folder": "E:/Music/My Music",
-    "file": "mp3_youtube_matches_1.csv"
-  },
-  {
-    "folder": "E:/Music/My Music Out 2",
-    "file": "mp3_youtube_matches_2.csv"
-  },
-]
-
 ACOUSTID_API_KEY = None
-index = 0
-MP3_FOLDER = CONFIGS[index]["folder"]
-OUTPUT_FILE = CONFIGS[index]["file"]
+MP3_FOLDERS = [
+    "E:/Music/My Music",
+    "E:/Music/My Music Out 2",
+    "E:/Music/downloads",
+]
+OUTPUT_FILE = "matches.csv"
 SIGN_IN_FILE = "sign_in.txt"
 BATCH_SIZE = 1
 lock = threading.Lock()
@@ -188,7 +176,7 @@ def clean_query(query, title=''):
     return query2
 
 def remove_symbols(query):
-    query = re.sub(r'[「」（）【】《》✧～『』┃║→⚠️🎃♯×📢🎀💌☔☀☽☪🌠♠🌟♥▼▶︎●◆／\–\"\(\)\[\]\#\.\~\-\/\&\,\_\:]', ' ', query).strip() 
+    query = re.sub(r'[「」（）【】《》✧～『』┃║→⚠️🎃♯×📢🎀💌☔☀☽☪🌠◇♣♠🌟♥ㆁ♪♫・♡▼▶︎●◆／\、\–\|\"\(\)\[\]\*\#\.\~\-\/\&\,\_\:]', ' ', query).strip() 
     query = re.sub(r'\s+', ' ', query).strip()
     return query
 
@@ -340,48 +328,50 @@ def main():
     results = []
     processed_files = load_processed_files()
     threads = []
-    for i, file in enumerate(os.listdir(MP3_FOLDER)):
-        if file.lower().endswith(".mp3") and file not in processed_files:
-            path = os.path.join(MP3_FOLDER, file)
-            print(f"[{i+1}] Processing: {file}")
-            artist, title = get_metadata(path)
-            acoustid_id = get_acoustid(path)
-            query = f"{artist} - {title}" if artist and title else os.path.splitext(file)[0]
+    for MP3_FOLDER in MP3_FOLDERS:
+        print("Processing folder", MP3_FOLDER)
+        for i, file in enumerate(os.listdir(MP3_FOLDER)):
+            if file.lower().endswith(".mp3") and file not in processed_files:
+                path = os.path.join(MP3_FOLDER, file)
+                print(f"[{i+1}] Processing: {file}")
+                artist, title = get_metadata(path)
+                acoustid_id = get_acoustid(path)
+                query = f"{artist} - {title}" if artist and title else os.path.splitext(file)[0]
 
-            yt_info = search_youtube_with_audio_info(query, artist, title or query)
+                yt_info = search_youtube_with_audio_info(query, artist, title or query)
 
-            result = {
-                "filename": file,
-                "artist": artist,
-                "title": title,
-                "acoustid_id": acoustid_id,
-                "yt_query": None,
-                "yt_id": None,
-                "yt_channel": None,
-                "yt_title": None,
-                "audio_format": None,
-                "audio_codec": None,
-                "audio_bitrate": None,
-                "score": 0,
-            }
-
-            if yt_info:
                 result = {
-                    **result,
-                    **yt_info,
+                    "filename": file,
+                    "artist": artist,
+                    "title": title,
+                    "acoustid_id": acoustid_id,
+                    "yt_query": None,
+                    "yt_id": None,
+                    "yt_channel": None,
+                    "yt_title": None,
+                    "audio_format": None,
+                    "audio_codec": None,
+                    "audio_bitrate": None,
+                    "score": 0,
                 }
 
-            if not result["yt_id"]:
-                continue
+                if yt_info:
+                    result = {
+                        **result,
+                        **yt_info,
+                    }
 
-            results.append(result)
+                if not result["yt_id"]:
+                    continue
 
-            # Save results asynchronously after every BATCH_SIZE entries
-            if len(results) % BATCH_SIZE == 0:
-                thread = threading.Thread(target=save_to_csv, args=(list(results),))
-                thread.start()
-                threads.append(thread)  # Store the thread for later joining
-                results = []
+                results.append(result)
+
+                # Save results asynchronously after every BATCH_SIZE entries
+                if len(results) % BATCH_SIZE == 0:
+                    thread = threading.Thread(target=save_to_csv, args=(list(results),))
+                    thread.start()
+                    threads.append(thread)  # Store the thread for later joining
+                    results = []
 
 
     # Ensure remaining results are saved
