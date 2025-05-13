@@ -17,7 +17,7 @@ YDL_OPTS = {
   #"cookiefile": "cookies.txt",
   'sleep_interval': 5,
   'max_sleep_interval': 10,
-  #"ignoreerrors": True,
+  "ignoreerrors": True,
 }
 
 ACOUSTID_API_KEY = None
