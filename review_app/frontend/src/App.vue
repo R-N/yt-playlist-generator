@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from './api'
+import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed } from './review'
 
 const counts = ref({ total: 0, unreviewed: 0, approved: 0, rejected: 0 })
 const queue = ref([])      // current batch of tracks to review
@@ -11,10 +12,6 @@ const error = ref('')
 const exporting = ref('')
 
 const current = computed(() => queue.value[idx.value] || null)
-
-function fmt(n, d = 0) {
-  return n == null ? '–' : Number(n).toFixed(d)
-}
 
 async function refreshCounts() {
   counts.value = await api.counts()
@@ -48,12 +45,13 @@ async function decide(approve) {
 }
 
 function advance() {
-  if (idx.value < queue.value.length - 1) idx.value++
-  else loadQueue()   // batch exhausted -> pull the next page
+  const { idx: next, reload } = advanceIndex(idx.value, queue.value.length)
+  if (reload) loadQueue()        // batch exhausted -> pull the next page
+  else idx.value = next
 }
 
 function prev() {
-  if (idx.value > 0) idx.value--
+  idx.value = prevIndex(idx.value)
 }
 
 async function doExport() {
@@ -69,9 +67,10 @@ async function doExport() {
 
 function onKey(e) {
   if (e.target.tagName === 'INPUT') return
-  if (e.key === 'a' || e.key === 'ArrowRight') decide(true)
-  else if (e.key === 'r' || e.key === 'ArrowLeft') decide(false)
-  else if (e.key === 'ArrowUp') prev()
+  const action = keyToAction(e.key)
+  if (action === 'approve') decide(true)
+  else if (action === 'reject') decide(false)
+  else if (action === 'back') prev()
 }
 
 onMounted(() => {
@@ -139,7 +138,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
               <div class="text-h6">{{ current.yt_channel }}</div>
               <div class="text-caption text-grey mb-2">{{ current.yt_title }}</div>
               <iframe v-if="current.yt_id" width="100%" height="220"
-                :src="`https://www.youtube.com/embed/${current.yt_id}`"
+                :src="youtubeEmbed(current.yt_id)"
                 frameborder="0" allow="encrypted-media" allowfullscreen />
             </v-col>
           </v-row>

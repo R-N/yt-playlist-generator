@@ -59,22 +59,46 @@ def local_bitrate_kbps(path):
         return None
 
 
-def main():
-    df = pd.read_csv(MATCHES_CSV)
-    index = build_file_index(MP3_FOLDERS)
+# --- Pure logic (no IO) so it can be unit-tested -------------------------
 
-    bitrates = []
-    missing = 0
-    for filename in df["filename"]:
+def bitrate_for_rows(filenames, index, read_bitrate=local_bitrate_kbps):
+    """Map each filename to its local bitrate (None when no file). Returns
+    (list_of_bitrates, missing_count). `read_bitrate` is injectable for tests."""
+    bitrates, missing = [], 0
+    for filename in filenames:
         path = index.get(filename)
         if not path:
             missing += 1
             bitrates.append(None)
         else:
-            bitrates.append(local_bitrate_kbps(path))
+            bitrates.append(read_bitrate(path))
+    return bitrates, missing
 
+
+def annotate_local_quality(df, bitrates, threshold=THRESHOLD_KBPS):
+    """Add local_bitrate + local_better columns. local_better == have a local
+    copy at or above the threshold (so the YouTube re-download is unwanted)."""
+    df = df.copy()
     df["local_bitrate"] = bitrates
-    df["local_better"] = df["local_bitrate"].notna() & (df["local_bitrate"] >= THRESHOLD_KBPS)
+    df["local_better"] = df["local_bitrate"].notna() & (df["local_bitrate"] >= threshold)
+    return df
+
+
+def download_ids(df, only_checked=ONLY_CHECKED):
+    """yt_id download list: drop local_better rows (already have it better),
+    optionally keep only verified (check==True) rows."""
+    keep = df[~df["local_better"]]
+    if only_checked:
+        keep = keep[keep["check"] == True]
+    return pd.Series(keep["yt_id"].dropna().unique())
+
+
+def main():
+    df = pd.read_csv(MATCHES_CSV)
+    index = build_file_index(MP3_FOLDERS)
+
+    bitrates, missing = bitrate_for_rows(df["filename"], index)
+    df = annotate_local_quality(df, bitrates, THRESHOLD_KBPS)
 
     df.to_csv(MATCHES_CSV, index=False)
     try:
@@ -82,16 +106,11 @@ def main():
     except Exception as e:
         print(f"Skipped writing {MATCHES_XLSX}: {e}")
 
-    # Download list: drop tracks we already have at >= THRESHOLD locally
-    keep = df[~df["local_better"]]
-    if ONLY_CHECKED:
-        keep = keep[keep["check"] == True]
-    ids = pd.Series(keep["yt_id"].dropna().unique())
+    ids = download_ids(df, ONLY_CHECKED)
     ids.to_csv(IDS_OUTPUT, index=False, header=False)
 
-    total = len(df)
     excluded = int(df["local_better"].sum())
-    print(f"Rows:            {total}")
+    print(f"Rows:            {len(df)}")
     print(f"File not found:  {missing}")
     print(f"Local >= {THRESHOLD_KBPS}k:   {excluded}  (excluded)")
     print(f"ids2.txt ids:    {len(ids)}")

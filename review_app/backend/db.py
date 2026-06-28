@@ -145,11 +145,12 @@ def reconcile_frames():
         nonlocal conflicts, filled
         name = row["filename"]
         x, c = xls_check.get(name), csv_check.get(name)
+        shared = name in xls_names
         if x is not None and c is not None and x != c:
             conflicts += 1
         if x is not None:
             return x
-        if c is not None:
+        if c is not None and shared:   # rescued a blank xlsx row from the csv
             filled += 1
         return c
 
