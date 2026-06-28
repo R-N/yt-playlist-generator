@@ -28,3 +28,8 @@ export function prevIndex(idx) {
 export function youtubeEmbed(id) {
   return id ? `https://www.youtube.com/embed/${id}` : null
 }
+
+// Vuetify color for an AcoustID/MusicBrainz cross-check confidence.
+export function confidenceColor(conf) {
+  return { strong: 'green', weak: 'amber', none: 'grey' }[conf] || 'grey'
+}

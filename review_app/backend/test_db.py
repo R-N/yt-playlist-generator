@@ -203,6 +203,24 @@ class ExtraJsonRoundTripTest(DbTestBase):
         # and the canonical columns are all present, in order
         self.assertEqual(list(out.columns), db.TRACK_COLUMNS)
 
+    def test_extra_fields_surface_in_get_rows(self):
+        # enrichment columns (mb_*) are non-core -> stored in extra_json; the
+        # API must still expose them so the review UI can show the cross-check.
+        seed = [{
+            "filename": "A.mp3", "yt_id": "a", "check": None,
+            "mb_artist": "Radiohead", "mb_title": "Creep",
+            "mb_confidence": "strong", "mb_suggest": 1, "ac_score": 0.91,
+        }]
+        write_matches(db.MATCHES_CSV, seed)
+        write_matches(db.MATCHES_XLSX, seed)
+        db.init_db()
+        rows, _ = db.get_rows(status="all")
+        r = rows[0]
+        self.assertEqual(r["mb_artist"], "Radiohead")
+        self.assertEqual(r["mb_confidence"], "strong")
+        self.assertEqual(r["mb_suggest"], 1)
+        self.assertNotIn("extra_json", r)   # flattened, not leaked as a blob
+
 
 class ReconcileEdgeTest(DbTestBase):
     def test_csv_only(self):

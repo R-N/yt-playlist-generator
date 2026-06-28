@@ -30,6 +30,7 @@ Only `playlist_generator.py` needs nothing beyond Python — the rest pull in th
 | `url_extractor.py` | Pulls YouTube video IDs out of a chat/forum export (`dump.csv`, filtered by author) and writes `ids1.txt`, `urls.txt`, and `playlists.txt`. |
 | `downloader.py` | Reads video IDs from `ids.txt` and downloads each as audio (Opus) into `downloads/`, with thumbnail and metadata embedded. Tracks progress in `downloaded_ids.txt` / `error_ids.txt`. |
 | `searcher.py` | Scans the local folders in `MP3_FOLDERS`, searches YouTube for the source video of each MP3, scores the candidates, and writes the best match per file to `matches.csv`. |
+| `acoustid_enrich.py` | Cross-checks each local mp3 against the AcoustID + MusicBrainz database (Picard's engine): fingerprints the audio, looks it up, and writes canonical `mb_artist`/`mb_title`/`mb_recording_id`/`ac_score` plus an `mb_confidence` + `mb_suggest` cross-check vs the YouTube match. Language-independent, so it catches wrong Japanese matches. Needs `fpcalc`, `pyacoustid`, and `ACOUSTID_API_KEY` (see review_app/README). Resumable. |
 | `cleanup_downloads.py` | Deletes failed, partial, and zero-byte files left in `downloads/` and removes their IDs from `downloaded_ids.txt`. |
 | `check_untracked.py` | Lists library files not yet verified in `matches.csv`, writing them to `untracked.txt`. |
 | `cleanup_tracked.py` | Deletes source MP3s that are already verified in `matches.csv`. |

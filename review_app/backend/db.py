@@ -213,9 +213,22 @@ def get_rows(status="all", limit=200, offset=0):
             (limit, offset),
         ).fetchall()
         total = conn.execute(f"SELECT COUNT(*) FROM tracks {where}").fetchone()[0]
-        return [dict(r) for r in rows], total
+        return [_expand_extra(dict(r)) for r in rows], total
     finally:
         conn.close()
+
+
+def _expand_extra(row):
+    """Flatten the extra_json blob back into the row so preserved fields
+    (mb_artist, mb_confidence, acoustid_id, ...) are visible to the API."""
+    extra = row.pop("extra_json", None)
+    if extra:
+        try:
+            for k, v in json.loads(extra).items():
+                row.setdefault(k, v)
+        except (ValueError, TypeError):
+            pass
+    return row
 
 
 def counts():

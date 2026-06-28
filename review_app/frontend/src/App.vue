@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from './api'
-import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed } from './review'
+import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed, confidenceColor } from './review'
 
 const counts = ref({ total: 0, unreviewed: 0, approved: 0, rejected: 0 })
 const queue = ref([])      // current batch of tracks to review
@@ -142,6 +142,18 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
                 frameborder="0" allow="encrypted-media" allowfullscreen />
             </v-col>
           </v-row>
+
+          <!-- AcoustID / MusicBrainz cross-check (the "Picard database") -->
+          <v-alert v-if="current.mb_title || current.mb_artist"
+            :color="confidenceColor(current.mb_confidence)"
+            variant="tonal" density="compact" class="mt-3">
+            <div class="text-caption">
+              MUSICBRAINZ · AcoustID {{ fmt(current.ac_score, 2) }} ·
+              <span class="text-uppercase font-weight-bold">{{ current.mb_confidence }}</span>
+              <span v-if="String(current.mb_suggest) === '1'"> · suggests APPROVE</span>
+            </div>
+            <div><strong>{{ current.mb_artist }}</strong> – {{ current.mb_title }}</div>
+          </v-alert>
 
           <v-divider class="my-3" />
           <div class="d-flex flex-wrap text-caption text-grey" style="gap:16px">

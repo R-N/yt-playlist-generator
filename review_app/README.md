@@ -56,6 +56,22 @@ Review, then click **Export CSV** to write your marks back to `matches.csv` /
 ## Keys
 `A` / `→` approve · `R` / `←` reject · `↑` back
 
+## AcoustID / MusicBrainz cross-check (optional)
+`acoustid_enrich.py` (repo root) fingerprints each local mp3 and tags it with
+the canonical MusicBrainz artist/title — language-independent, so it catches
+wrong Japanese matches. The review UI shows it as a MusicBrainz panel
+(green/amber/grey = strong/weak/none) and flags `suggests APPROVE` when AcoustID
+is confident and the YouTube candidate agrees.
+
+Setup (in your mambaforge env):
+1. Free API key — register an app at <https://acoustid.org/new-application>.
+2. `conda install -c conda-forge chromaprint` (provides `fpcalc`; verify `fpcalc -version`).
+3. `pip install pyacoustid musicbrainzngs`
+4. Expose the key: `export ACOUSTID_API_KEY=YOURKEY` (bash) /
+   `$env:ACOUSTID_API_KEY = "YOURKEY"` (PowerShell).
+5. `python acoustid_enrich.py` (resumable), then **re-seed** the review DB
+   (delete `backend/review.db`) so the new `mb_*` columns import.
+
 ## Tests
 `unittest` (stdlib). Every test redirects DB/CSV/XLSX paths and `MP3_FOLDERS`
 to a temp dir, so real `matches.*` and music files are never touched.

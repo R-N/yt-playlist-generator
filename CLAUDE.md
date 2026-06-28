@@ -46,6 +46,8 @@ The `check` column is hand-curated and **irreplaceable** — songs can be re-dow
 
 When the CSV and XLSX disagree, the **XLSX wins** (it is what the human last touched). Re-exporting from the review app rewrites both from SQLite and ends the split-brain.
 
+**AcoustID/MusicBrainz cross-check** (`acoustid_enrich.py`): fingerprints local audio and writes `mb_artist`, `mb_title`, `mb_recording_id`, `ac_score`, `mb_confidence` (strong/weak/none), `mb_suggest` into matches. These are non-core columns, so they ride along in the review app via `extra_json` and surface in the UI's MusicBrainz panel. The confidence logic (`match_confidence`) is pure and unit-tested; the fingerprinting needs `fpcalc` + `pyacoustid` + `ACOUSTID_API_KEY`. Run enrich on `matches.csv`, then re-seed the review DB (delete `review_app/backend/review.db`) so the new columns import.
+
 ## Key cross-cutting conventions
 
 - **Resume via append-only logs.** Long-running scripts treat their output as a checkpoint: `downloader.py` skips IDs already in `downloaded_ids.txt`; `searcher.py` skips files already passing in `matches.csv`. Re-running is safe and resumes where it left off — deleting the log forces a full redo.

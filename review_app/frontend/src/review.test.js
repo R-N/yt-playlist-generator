@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed } from './review'
+import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed, confidenceColor } from './review'
 
 describe('keyToAction', () => {
   it('maps approve keys', () => {
@@ -47,5 +47,14 @@ describe('youtubeEmbed', () => {
     expect(youtubeEmbed('abc123')).toBe('https://www.youtube.com/embed/abc123')
     expect(youtubeEmbed('')).toBeNull()
     expect(youtubeEmbed(null)).toBeNull()
+  })
+})
+
+describe('confidenceColor', () => {
+  it('maps confidence to a color, defaults to grey', () => {
+    expect(confidenceColor('strong')).toBe('green')
+    expect(confidenceColor('weak')).toBe('amber')
+    expect(confidenceColor('none')).toBe('grey')
+    expect(confidenceColor(undefined)).toBe('grey')
   })
 })
