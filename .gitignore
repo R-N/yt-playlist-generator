@@ -1,17 +1,39 @@
-
+# --- Inputs / generated text I/O (regenerable) ---
 urls.txt
 playlists.txt
 dump.txt
 dump.csv
 ids.txt
+ids1.txt
+ids2.txt
 downloaded_ids.txt
-/downloads
-urls.txt
+downloaded_ids.txt.bak
 error_ids.txt
+untracked.txt
+/downloads
+
+# --- Secrets / session ---
 cookies.txt
-mp3_youtube_matches*.csv
-matches.csv
-matches*.csv
 sign_in.txt
+
+# --- Curation: TRACKED on purpose (the irreplaceable `check` marks) ---
+# matches.csv and matches.xlsx are committed. Their ad-hoc backups are not.
+matches - Copy*.csv
+matches - Copy*.xlsx
+mp3_youtube_matches*.csv
+~$matches.xlsx
+
+# --- Review app artifacts ---
+review_app/backend/review.db
+review_app/backend/review.db-wal
+review_app/backend/review.db-shm
+review_app/frontend/node_modules/
+review_app/frontend/dist/
+review_app/backups/
+
+# --- Misc ---
 .ipynb_checkpoints/
-matches.xlsx
+__pycache__/
+*.pyc
+tmp*.tmp
+*.tmp
