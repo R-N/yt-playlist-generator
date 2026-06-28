@@ -8,18 +8,31 @@ DEFAULT_EXTENSION = [
     '.mp4.ytdl', '.webm.ytdl', '.m4a.ytdl',
 ]
 
-def get_ids_and_paths_by_ext(download_dir, extension):
-    files = [f for f in os.listdir(download_dir) if f.endswith(extension)]
-    ids = []
-    paths_to_delete = []
+ID_PATTERN = r'\[([a-zA-Z0-9_-]{11})\]'   
 
-    pattern = re.compile(r'\[([a-zA-Z0-9_-]{11})\]' + re.escape(extension) + r'$')
-    for file in files:
-        match = pattern.search(file)
-        if match:
-            ids.append(match.group(1))
-            paths_to_delete.append(os.path.join(download_dir, file))
-    return ids, paths_to_delete
+def extract_id(file, extension=None):
+    if extension:
+        pattern = re.compile(ID_PATTERN + re.escape(extension) + r'$')
+    else:
+        pattern = re.compile(ID_PATTERN + r'.')
+    match = pattern.search(file)
+    if match:
+        return match.group(1)
+
+def filter_ids(files, extension=None):
+    pairs = [(extract_id(f, extension), f) for f in files]
+    pairs = [(i, f) for i, f in pairs if i]
+    if not pairs:
+        return [], []
+    ids, files = zip(*pairs)
+    return list(ids), list(files)
+
+def has_allowed_extension(filename, extensions):
+    return any(filename.endswith(ext) for ext in ALLOWED_EXTENSIONS)
+
+def get_files_by_ext(download_dir, extension):
+    return [os.path.join(download_dir, f) for f in os.listdir(download_dir) if f.endswith(extension)]
+    # return [os.path.join(download_dir, f) for f in os.listdir(download_dir) if has_allowed_extension(filename, extensions)]
 
 def remove_ids_from_file(ids_to_remove, file_path):
     if not os.path.exists(file_path):
@@ -47,6 +60,13 @@ def delete_files(file_paths):
             print(f"Could not delete {path}: {e}")
     print(f"Deleted {deleted} files.")
 
+def get_zero_byte_files(folder):
+    return [
+        os.path.join(folder, f)
+        for f in os.listdir(folder)
+        if os.path.isfile(os.path.join(folder, f)) and os.path.getsize(os.path.join(folder, f)) == 0
+    ]
+
 if __name__ == "__main__":
     extensions = sys.argv[1:] if len(sys.argv) > 1 else DEFAULT_EXTENSION
     extensions = [ext if ext.startswith('.') else '.' + ext for ext in extensions]
@@ -58,10 +78,17 @@ if __name__ == "__main__":
     all_paths = []
 
     for ext in extensions:
-        ids, paths = get_ids_and_paths_by_ext(download_folder, ext)
+        paths = get_files_by_ext(download_folder, ext)
+        ids, paths = filter_ids(paths, ext)
         print(f"Found {len(ids)} files with extension {ext}.")
         all_ids.update(ids)
         all_paths.extend(paths)
+
+    paths = get_zero_byte_files(download_folder)
+    ids, paths = filter_ids(paths)
+    print(f"Found {len(ids)} empty files.")
+    all_ids.update(ids)
+    all_paths.extend(paths)
 
     if all_ids:
         remove_ids_from_file(all_ids, downloaded_ids_file)
