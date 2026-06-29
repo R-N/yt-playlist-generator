@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Music Toolkit — YT Liker",
+  "version": "0.1.0",
+  "description": "Like a list of YouTube videos (from the Music Toolkit pipeline) on your own account, throttled, using your logged-in browser session.",
+  "permissions": ["tabs"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "http://localhost:8000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "YT Liker"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

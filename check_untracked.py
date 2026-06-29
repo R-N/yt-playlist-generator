@@ -16,6 +16,9 @@ PROCESSED_FILE = "matches.csv"
 OUTPUT_FILE = "untracked.txt"
 SIGN_IN_FILE = "sign_in.txt"
 
+def is_valid_youtube_id(s):
+    return bool(re.fullmatch(r"[a-zA-Z0-9_-]{11}", s or ""))
+
 def get_metadata(mp3_path, separators=['-', '–']):
     try:
         #raise Exception("Skipping metadata")
@@ -92,4 +95,5 @@ def main():
     results = pd.Series(results)
     results.to_csv(OUTPUT_FILE, index=False, header=False)
 
-main()
+if __name__ == "__main__":
+    main()

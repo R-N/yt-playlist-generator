@@ -14,6 +14,9 @@ MP3_FOLDERS = [
 ]
 PROCESSED_FILE = "matches - Copy (3).csv"
 
+def is_valid_youtube_id(s):
+    return bool(re.fullmatch(r"[a-zA-Z0-9_-]{11}", s or ""))
+
 def get_metadata(mp3_path, separators=['-', '–']):
     try:
         #raise Exception("Skipping metadata")
@@ -79,4 +82,5 @@ def main():
                     print("Deleting:", full_path)
                     os.remove(full_path)
 
-main()
+if __name__ == "__main__":
+    main()

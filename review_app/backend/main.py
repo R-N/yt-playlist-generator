@@ -15,7 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import db
-from config import MP3_FOLDERS, AUTO_EXPORT_EVERY
+import jobs
+import settings
+import discord_service
+from config import MP3_FOLDERS, AUTO_EXPORT_EVERY, REPO_ROOT
 
 app = FastAPI(title="Match Review")
 
@@ -34,6 +37,7 @@ _decision_count = 0     # since-startup counter for auto-export
 
 @app.on_event("startup")
 def _startup():
+    settings.apply_to_environ()     # load .env secrets so subprocesses inherit them
     db.init_db()
     for folder in MP3_FOLDERS:
         if not os.path.isdir(folder):
@@ -79,6 +83,89 @@ def api_decision(d: Decision):
 @app.post("/api/export")
 def api_export():
     return db.export_matches()
+
+
+# --- Settings (.env secrets) ------------------------------------------------
+class SettingsIn(BaseModel):
+    DISCORD_BOT_TOKEN: str | None = None
+    DISCORD_CHANNEL_ID: str | None = None
+    ACOUSTID_API_KEY: str | None = None
+
+
+@app.get("/api/settings")
+def api_settings_get():
+    return settings.public_view()
+
+
+@app.post("/api/settings")
+def api_settings_set(s: SettingsIn):
+    # only persist keys the client actually sent (others stay as-is)
+    sent = {k: v for k, v in s.model_dump().items() if v is not None}
+    return settings.save(sent)
+
+
+# --- Discord harvest --------------------------------------------------------
+class DiscordFetchIn(BaseModel):
+    channel_id: str | None = None
+    author: str | None = None
+    write_files: bool = True
+
+
+@app.post("/api/discord/fetch")
+def api_discord_fetch(d: DiscordFetchIn):
+    channel_id = d.channel_id or settings.get("DISCORD_CHANNEL_ID")
+    try:
+        return discord_service.fetch_and_extract(
+            channel_id, author=d.author, write_files=d.write_files
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- Likes queue (consumed by the Chrome liker extension) -------------------
+@app.get("/api/likes/queue")
+def api_likes_queue():
+    """Serve the harvested video ids (ids.txt) for the liker extension to like."""
+    path = os.path.join(REPO_ROOT, "ids.txt")
+    ids = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            ids = [line.strip() for line in f if line.strip()]
+    return {"ids": ids}
+
+
+# --- Pipeline scripts (background jobs) -------------------------------------
+class JobIn(BaseModel):
+    args: list[str] = []
+
+
+@app.get("/api/scripts")
+def api_scripts():
+    return jobs.catalog()
+
+
+@app.get("/api/scripts/{name}")
+def api_script_state(name: str, tail: int | None = None):
+    if name not in jobs.SCRIPTS:
+        raise HTTPException(status_code=404, detail="unknown script")
+    return jobs.state(name, tail=tail)
+
+
+@app.post("/api/scripts/{name}/run")
+def api_script_run(name: str, body: JobIn | None = None):
+    try:
+        return jobs.start(name, args=(body.args if body else None))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="unknown script")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/api/scripts/{name}/stop")
+def api_script_stop(name: str):
+    if name not in jobs.SCRIPTS:
+        raise HTTPException(status_code=404, detail="unknown script")
+    return jobs.stop(name)
 
 
 @app.get("/api/audio/{track_id}")

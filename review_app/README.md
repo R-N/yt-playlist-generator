@@ -9,6 +9,29 @@ candidate, approve/reject with one key. Replaces hand-editing the spreadsheet.
 - Local audio served read-only with HTTP Range (scrubbing works); YouTube
   candidate shown via the official IFrame embed.
 
+## Tabs
+
+The UI is tabbed; the original review screen is one of them.
+
+- **Review** — curate matches by ear (the rest of this README).
+- **Discord** — fetch a Discord channel's messages via the bot API, extract every
+  YouTube video id, and write `ids.txt`/`urls.txt`/`playlists.txt` at the repo
+  root (feeds the downloader / playlist flow). Backed by `discord_service.py`,
+  which reuses the repo-root `discord_fetch.py` + `discord_extractor.py`.
+- **Pipeline** — run any root script as a background subprocess job and watch its
+  log live; Stop cancels it. The scripts are unchanged — the app orchestrates
+  them (this keeps the repo's "scripts share files as their interface" design).
+  Destructive scripts (`cleanup_downloads`, `cleanup_tracked` — they delete
+  files) are flagged red and require typing `DELETE` before they run.
+- **Settings** — store secrets in a gitignored `.env` at the repo root
+  (`DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `ACOUSTID_API_KEY`). On startup the
+  backend loads `.env` into the environment (without clobbering real env vars),
+  so the subprocess scripts inherit them. Secrets are masked in the API.
+
+A companion Chrome extension (`../extension/`) consumes `ids.txt` via
+`GET /api/likes/queue` to like the harvested videos on your account — see
+`extension/README.md`.
+
 ## Data safety (this is the point)
 - Your verified `check` marks are the irreplaceable asset. The app guards them:
   - SQLite store with ACID transactions — no half-written file ever.
@@ -88,6 +111,9 @@ python -m unittest test_api -v                    # API only (needs httpx)
   (`extra_json`) round-trip.
 - `test_api` — endpoints, the auto-export-every-N trigger, and the audio
   endpoint's read-only / `Range` (206) / 404 behavior.
+- `test_integrations` — settings `.env` round-trip + secret masking, the Discord
+  service (extraction order, embeds, author filter, missing-token error; network
+  stubbed), and the job catalog's destructive flags.
 
 Frontend logic (Vitest) — pure helpers in `src/review.js` (key mapping, queue
 advance, formatting, embed URL):

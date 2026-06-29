@@ -15,6 +15,7 @@ untracked.txt
 # --- Secrets / session ---
 cookies.txt
 sign_in.txt
+.env
 
 # --- Curation: TRACKED on purpose (the irreplaceable `check` marks) ---
 # matches.csv and matches.xlsx are committed. Their ad-hoc backups are not.

@@ -28,6 +28,8 @@ Only `playlist_generator.py` needs nothing beyond Python — the rest pull in th
 | Script | Does |
 | --- | --- |
 | `url_extractor.py` | Pulls YouTube video IDs out of a chat/forum export (`dump.csv`, filtered by author) and writes `ids1.txt`, `urls.txt`, and `playlists.txt`. |
+| `discord_fetch.py` | Pulls a Discord channel's messages via the bot REST API (`DISCORD_BOT_TOKEN`) and writes them to `discord.json`. Usage: `python discord_fetch.py <channel_id>`. |
+| `discord_extractor.py` | Reads a Discord export (`discord.json` or `.csv` from DiscordChatExporter) and extracts every YouTube video ID into `ids1.txt`/`urls.txt`/`playlists.txt`. Handles `youtu.be`, `watch?v=`, `shorts/`, `live/`, `embed/`, and embed metadata. |
 | `downloader.py` | Reads video IDs from `ids.txt` and downloads each as audio (Opus) into `downloads/`, with thumbnail and metadata embedded. Tracks progress in `downloaded_ids.txt` / `error_ids.txt`. |
 | `searcher.py` | Scans the local folders in `MP3_FOLDERS`, searches YouTube for the source video of each MP3, scores the candidates, and writes the best match per file to `matches.csv`. |
 | `filter_local_quality.py` | Flags rows whose local mp3 is already ≥ 192 kbps (so the YouTube re-download is unwanted), adds `local_bitrate` / `local_better` columns, and writes a filtered download list to `ids2.txt`. |
@@ -52,6 +54,16 @@ Downloading and searching are resumable: re-running skips IDs already logged as 
 Reviewing thousands of matches in a spreadsheet is slow. `review_app/` is a small FastAPI + SQLite + Vue/Vuetify app that plays your local mp3 next to the YouTube candidate (and the MusicBrainz cross-check) so you can approve/reject by ear, one keystroke each. It imports `matches.csv`/`matches.xlsx`, stores curation in SQLite, and exports back to both files (snapshotting backups first). See [`review_app/README.md`](review_app/README.md) for setup, run, and tests.
 
 `matches.csv` and `matches.xlsx` hold the curation (the `check` column) and are committed to git so the marks are versioned; the `matches - Copy*` files are old manual backups.
+
+Beyond reviewing, the app now hosts the rest of the toolkit so you don't have to drop to a shell:
+
+- **Discord tab** — fetch a channel's YouTube links straight into the pipeline (`ids.txt`/`urls.txt`/`playlists.txt`).
+- **Pipeline tab** — run any root script (downloader, searcher, enrich, cleanup, …) as a background job and watch its log. Destructive scripts (the `cleanup_*` deleters) are gated behind a typed `DELETE` confirmation.
+- **Settings tab** — store secrets (Discord bot token, AcoustID key) in a gitignored `.env` at the repo root; the app applies them to the environment so launched scripts inherit them.
+
+## Liking videos back (`extension/`)
+
+`extension/` is a Chrome extension that likes a list of harvested video IDs on **your** YouTube account from your logged-in browser session (no OAuth). It reads `ids.txt` from the running app (`/api/likes/queue`) or a pasted list, and likes them throttled with a Stop button. Bulk liking can trip spam limits — see [`extension/README.md`](extension/README.md).
 
 ### Sign-in / age-restricted videos
 

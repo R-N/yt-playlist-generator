@@ -21,4 +21,18 @@ export const api = {
   decide: (track_id, decision) => jpost('/api/decision', { track_id, decision }),
   export: () => jpost('/api/export'),
   audioUrl: (id) => `/api/audio/${id}`,
+
+  // settings (.env secrets)
+  getSettings: () => jget('/api/settings'),
+  saveSettings: (body) => jpost('/api/settings', body),
+
+  // discord harvest
+  discordFetch: (body) => jpost('/api/discord/fetch', body),
+
+  // pipeline scripts (background jobs)
+  scripts: () => jget('/api/scripts'),
+  scriptState: (name, tail) =>
+    jget(`/api/scripts/${name}` + (tail ? `?tail=${tail}` : '')),
+  scriptRun: (name, args = []) => jpost(`/api/scripts/${name}/run`, { args }),
+  scriptStop: (name) => jpost(`/api/scripts/${name}/stop`),
 }
