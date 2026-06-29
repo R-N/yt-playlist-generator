@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-What started as a single tool that turns a list of YouTube URLs into playlist URLs has grown into a personal toolkit for managing a music library: extracting video IDs from a chat/forum export, downloading audio, reverse-matching local MP3s back to their YouTube source, and cleaning up the results. There is no package, build step, or test suite — each file is a standalone script run directly with `python <script>.py`.
+What started as a single tool that turns a list of YouTube URLs into playlist URLs has grown into a personal toolkit for managing a music library: extracting video IDs from a chat/forum export, downloading audio, reverse-matching local MP3s back to their YouTube source, cross-checking those matches against the AcoustID/MusicBrainz database, and curating the results. The repo root is a set of standalone scripts run directly with `python <script>.py` (nothing to install). On top sits `review_app/` — a FastAPI + SQLite + Vue/Vuetify web app for curating matches, with its own test suite (`unittest` + Vitest).
 
 Most scripts hardcode their config as module-level constants at the top of the file (input/output filenames, the `MP3_FOLDERS` list, boolean mode flags). To change behavior you edit those constants, not CLI args. `url_extractor.py` is the exception that uses `sys.argv`.
 
@@ -15,12 +15,21 @@ python playlist_generator.py     # urls.txt -> playlists.txt (the original tool)
 python url_extractor.py          # dump.csv -> ids1.txt, urls.txt, playlists.txt
 python downloader.py             # ids.txt -> downloads/ (audio via yt-dlp)
 python searcher.py               # scans MP3_FOLDERS -> matches.csv
+python filter_local_quality.py   # flag tracks whose local mp3 >= 192 kbps -> ids2.txt
+python acoustid_enrich.py        # AcoustID/MusicBrainz cross-check -> mb_* columns
 python cleanup_downloads.py [ext...]   # delete failed/partial/zero-byte downloads
 python check_untracked.py        # matches.csv -> untracked.txt (unverified files)
 python cleanup_tracked.py        # delete source MP3s already verified in matches.csv
 ```
 
-Dependencies (no `requirements.txt`): `yt-dlp`, `pandas`, `mutagen`, `rapidfuzz`, `pykakasi`. `ffmpeg` must be on PATH (yt-dlp post-processing). `acoustid` is imported lazily only if `ACOUSTID_API_KEY` is set.
+Review app (curation UI) lives in `review_app/`:
+```bash
+cd review_app
+python install.py    # one-time: pip + npm deps   (or install.bat / .ps1 / .sh)
+python run.py        # build frontend + serve SPA+API on :8000   (run.py --dev = hot reload)
+```
+
+Dependencies for the root scripts (no `requirements.txt`): `yt-dlp`, `pandas`, `mutagen`, `rapidfuzz`, `pykakasi`. `ffmpeg` must be on PATH (yt-dlp post-processing). `acoustid` + `fpcalc` + `ACOUSTID_API_KEY` are needed only for `acoustid_enrich.py` (imported lazily). The review app has its own `review_app/backend/requirements.txt` (`fastapi`, `uvicorn`, `pandas`, `openpyxl`; `httpx` for tests).
 
 ## Pipeline / data flow
 
@@ -38,8 +47,7 @@ The scripts share a set of plain-text and CSV files as their interface — there
 
 The `check` column is hand-curated and **irreplaceable** — songs can be re-downloaded, the marks cannot. Know which file holds them:
 
-- **`matches.xlsx` — the source of truth for curation.** This is the file edited by hand in Excel; it has the newest and most `check` marks. The review app (`review_app/`) imports from here. As of last check: 7874 rows, 6471 approved, 22 cols.
-- **`matches.csv` — a derived CSV export that *lags* the xlsx.** Same schema, but written by an earlier notebook run (7876 rows, 6423 approved — 48 fewer, ~13h older). Treat as derived/stale until re-exported, **not** as the authoritative marks. Most scripts read this; the review app and any "where are my marks" question should prefer the xlsx.
+- **`matches.xlsx` + `matches.csv` — the curation, now reconciled and in sync.** Both hold the same baseline (7876 rows, 6475 approved, 22 core cols) and are **git-tracked**. The `check` column is the hand-curated, irreplaceable mark. Historically the xlsx was the hand-edited source of truth and the csv lagged it (a 6471 vs 6423 split-brain); that was reconciled — union of rows + xlsx-priority marks, never dropping a decision — and promoted to both files. Going forward the review app's SQLite is the live store and its **Export** rewrites both atomically.
 - **`dump.csv` — input.** The chat/forum export (`Author`, `Content`, … 6 cols, ~5330 rows) that `url_extractor.py` filters by author to harvest video IDs. Not curation.
 - **`matches - Copy*.csv` / `matches - Copy*.xlsx` — manual dated backups.** Ad-hoc snapshots of the curation at various points (2025-05-25 → 05-27). Copies where `rows == check` are approved-only exports; others are full sets with marks. Frozen history — don't edit; `review_app/backups/` (auto-snapshots on export) supersedes this habit.
 - **Plain-text I/O (one value per line):** `ids.txt` (downloader input), `ids1.txt`/`ids2.txt` (extractor / notebook outputs), `urls.txt`, `playlists.txt`, `downloaded_ids.txt` (+`.bak`) / `error_ids.txt` (download logs), `untracked.txt` (unverified list), `sign_in.txt` (age-gated URLs), `cookies.txt` (exported browser cookies).
@@ -47,6 +55,16 @@ The `check` column is hand-curated and **irreplaceable** — songs can be re-dow
 When the CSV and XLSX disagree, the **XLSX wins** (it is what the human last touched). Re-exporting from the review app rewrites both from SQLite and ends the split-brain.
 
 **AcoustID/MusicBrainz cross-check** (`acoustid_enrich.py`): fingerprints local audio and writes `mb_artist`, `mb_title`, `mb_recording_id`, `ac_score`, `mb_confidence` (strong/weak/none), `mb_suggest` into matches. These are non-core columns, so they ride along in the review app via `extra_json` and surface in the UI's MusicBrainz panel. The confidence logic (`match_confidence`) is pure and unit-tested; the fingerprinting needs `fpcalc` + `pyacoustid` + `ACOUSTID_API_KEY`. Run enrich on `matches.csv`, then re-seed the review DB (delete `review_app/backend/review.db`) so the new columns import.
+
+## Review app (`review_app/`)
+
+FastAPI + SQLite backend (`backend/`) and a Vue 3 + Vuetify / Vite frontend (`frontend/`) for curating matches by ear instead of hand-editing the spreadsheet. Play the local mp3 next to the YouTube candidate (embedded IFrame) and the MusicBrainz cross-check, then approve/reject with one key (`A`/`→`, `R`/`←`, `↑` back).
+
+- **SQLite is the live store** (`backend/review.db`, created on first run). It reconciles `matches.csv` + `matches.xlsx` into a `tracks` table; non-core columns are preserved in an `extra_json` blob (flattened back out by `db._expand_extra` so the API sees `mb_*` etc.). Re-seed by deleting `review.db`. CSV/XLSX are import/export/backup formats, not the live store.
+- **Curation safety** (the marks are irreplaceable): the `decisions` table is **append-only**, each approve/reject is one atomic SQLite transaction, **Export** snapshots the old files into `backups/` then writes via temp-file + rename, and marks auto-export to `matches.csv` every 25 decisions (`AUTO_EXPORT_EVERY`). The app never writes or deletes audio — the audio endpoint is read-only and Range-served (so the player can scrub).
+- **Run:** `python install.py` then `python run.py` (built mode = build frontend, serve SPA+API on :8000) or `python run.py --dev` (uvicorn `--reload` + Vite on :5173). Native `.bat`/`.ps1`/`.sh` wrappers forward args.
+- **Config** is in `backend/config.py` (paths, `MP3_FOLDERS`, `MATCHES_SOURCE`, `AUTO_EXPORT_EVERY`).
+- **Tests** (run from `review_app/backend`): `python -m unittest discover -p "test_*.py"` (`test_db.py` data layer, `test_api.py` endpoints via FastAPI TestClient — needs `httpx`); frontend `cd frontend && npm run test` (Vitest over the pure helpers in `src/review.js`). Root scripts also have tests: `test_filter.py`, `test_acoustid.py`, and `review_app/test_scripts.py` for the launchers.
 
 ## Key cross-cutting conventions
 
@@ -70,5 +88,6 @@ When tuning match quality, adjust the reward/penalty dicts and the fuzzy thresho
 
 - Windows-first: paths in `MP3_FOLDERS` are absolute `E:/...` drive paths; update them for any other machine.
 - The repo working tree is messy by design — many `matches - Copy*.csv/.xlsx` snapshots, `tmp*.tmp`, and `*.bak` files are manual backups, not generated artifacts. Don't assume they're safe to delete without asking.
+- `.gitignore` deliberately **tracks** `matches.csv` and `matches.xlsx` (the curation) while ignoring everything else regenerable: the `matches - Copy*` backups, `review_app/backups/`, `review_app/backend/review.db*`, `review_app/frontend/node_modules` + `dist`, `__pycache__`, and the plain-text I/O files. Commit `matches.csv`/`.xlsx` to version the marks.
 - `cleanup_csv.py` and `remove_index.py` are one-off CSV-repair utilities with stale hardcoded filenames (e.g. `mp3_youtube_matches_*.csv`); treat them as references for fixing malformed `matches.csv`, not as part of the regular flow.
 - `check_untracked.py`, `cleanup_tracked.py`, and `searcher.py` call `is_valid_youtube_id()` in `get_metadata()` but only `searcher.py` defines it — the other two will raise `NameError` if a file's metadata can't be read and that branch is hit. Define/import it before relying on those scripts.

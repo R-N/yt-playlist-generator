@@ -18,8 +18,9 @@ candidate, approve/reject with one key. Replaces hand-editing the spreadsheet.
   - `Export CSV` snapshots the old `matches.csv`/`.xlsx` into `backups/` first,
     then writes via temp-file + atomic rename.
   - The app never writes or deletes any audio file.
-- On first launch it imports `matches.csv` once (only if the DB is empty), so
-  your existing marks are preserved, not reset.
+- On first launch it reconciles `matches.csv` + `matches.xlsx` into the DB once
+  (only if empty) — union of rows, xlsx-priority marks, never dropping a
+  decision — so your existing marks are preserved, not reset.
 
 Native wrappers (`.bat`, `.ps1`, `.sh`) wrap the Python scripts and forward all
 args. Use whichever fits your shell; they do the same thing.
@@ -96,6 +97,7 @@ npm run test
 ```
 
 ## Re-seeding the DB
-The DB imports `matches.csv` only when empty. To re-import after changing the
-CSV, delete `backend/review.db` (and `-wal`/`-shm`) and restart — **export
-first** so you don't lose marks made only in the DB.
+The DB reconciles `matches.csv` + `matches.xlsx` only when empty. To re-import
+after changing them (e.g. after `acoustid_enrich.py`), delete `backend/review.db`
+(and `-wal`/`-shm`) and restart — **export first** so you don't lose marks made
+only in the DB.

@@ -1,8 +1,8 @@
 # yt-playlist-generator
 
-A small set of Python scripts for managing a YouTube-sourced music library. The original tool just turns a list of video URLs into a YouTube playlist link; the rest of the scripts grew around downloading audio, matching local MP3s back to their YouTube source, and cleaning up the results.
+A small toolkit for managing a YouTube-sourced music library. The original tool just turns a list of video URLs into a YouTube playlist link; it grew to cover downloading audio, matching local MP3s back to their YouTube source, cross-checking those matches against the AcoustID/MusicBrainz database, and curating the results. There's also a small web app (`review_app/`) for reviewing matches by ear.
 
-Each script is standalone — run it directly with `python <script>.py`. There is no install step. Configuration lives in constants at the top of each file (input/output filenames, the `MP3_FOLDERS` list, mode flags); edit those to change behavior.
+The root scripts are standalone — run each directly with `python <script>.py`, no install. Configuration lives in constants at the top of each file (input/output filenames, the `MP3_FOLDERS` list, mode flags); edit those to change behavior. The web app is the exception — it has its own setup (see [`review_app/README.md`](review_app/README.md)).
 
 ## Requirements
 
@@ -30,6 +30,7 @@ Only `playlist_generator.py` needs nothing beyond Python — the rest pull in th
 | `url_extractor.py` | Pulls YouTube video IDs out of a chat/forum export (`dump.csv`, filtered by author) and writes `ids1.txt`, `urls.txt`, and `playlists.txt`. |
 | `downloader.py` | Reads video IDs from `ids.txt` and downloads each as audio (Opus) into `downloads/`, with thumbnail and metadata embedded. Tracks progress in `downloaded_ids.txt` / `error_ids.txt`. |
 | `searcher.py` | Scans the local folders in `MP3_FOLDERS`, searches YouTube for the source video of each MP3, scores the candidates, and writes the best match per file to `matches.csv`. |
+| `filter_local_quality.py` | Flags rows whose local mp3 is already ≥ 192 kbps (so the YouTube re-download is unwanted), adds `local_bitrate` / `local_better` columns, and writes a filtered download list to `ids2.txt`. |
 | `acoustid_enrich.py` | Cross-checks each local mp3 against the AcoustID + MusicBrainz database (Picard's engine): fingerprints the audio, looks it up, and writes canonical `mb_artist`/`mb_title`/`mb_recording_id`/`ac_score` plus an `mb_confidence` + `mb_suggest` cross-check vs the YouTube match. Language-independent, so it catches wrong Japanese matches. Needs `fpcalc`, `pyacoustid`, and `ACOUSTID_API_KEY` (see review_app/README). Resumable. |
 | `cleanup_downloads.py` | Deletes failed, partial, and zero-byte files left in `downloads/` and removes their IDs from `downloaded_ids.txt`. |
 | `check_untracked.py` | Lists library files not yet verified in `matches.csv`, writing them to `untracked.txt`. |
@@ -42,9 +43,15 @@ Only `playlist_generator.py` needs nothing beyond Python — the rest pull in th
 The scripts don't call each other — they pass data through shared files. Two main flows:
 
 - **Build / download:** `dump.csv` → `url_extractor.py` → ID and URL lists → `downloader.py` → audio in `downloads/`.
-- **Match an existing library:** `searcher.py` → `matches.csv` → `check_untracked.py` / `cleanup_tracked.py`.
+- **Match an existing library:** `searcher.py` → `matches.csv` → (optionally `filter_local_quality.py` and `acoustid_enrich.py` to enrich) → curate (web app or by hand) → `check_untracked.py` / `cleanup_tracked.py`.
 
 Downloading and searching are resumable: re-running skips IDs already logged as done, so an interrupted run picks up where it stopped.
+
+## Curation web app (`review_app/`)
+
+Reviewing thousands of matches in a spreadsheet is slow. `review_app/` is a small FastAPI + SQLite + Vue/Vuetify app that plays your local mp3 next to the YouTube candidate (and the MusicBrainz cross-check) so you can approve/reject by ear, one keystroke each. It imports `matches.csv`/`matches.xlsx`, stores curation in SQLite, and exports back to both files (snapshotting backups first). See [`review_app/README.md`](review_app/README.md) for setup, run, and tests.
+
+`matches.csv` and `matches.xlsx` hold the curation (the `check` column) and are committed to git so the marks are versioned; the `matches - Copy*` files are old manual backups.
 
 ### Sign-in / age-restricted videos
 
