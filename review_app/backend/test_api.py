@@ -239,5 +239,87 @@ class ResolveYtAudioTest(unittest.TestCase):
         self.assertIn("https://www.youtube.com/watch?v=dQw4w9WgXcQ", captured["cmd"])
 
 
+class LibraryApiTest(ApiTestBase):
+    """The Library list endpoint tags each track with a digestible state and the
+    single-track endpoint hands the full row to the Review view."""
+
+    def test_library_states(self):
+        rows = self.client.get("/api/library").json()["rows"]
+        by_name = {r["filename"]: r for r in rows}
+        # A.mp3 has a local file + a yt link, not yet reviewed -> unreviewed
+        self.assertEqual(by_name["A.mp3"]["state"], "unreviewed")
+        self.assertTrue(by_name["A.mp3"]["has_local"])
+        # B.mp3 has a yt link but no local file -> link_only
+        self.assertEqual(by_name["B.mp3"]["state"], "link_only")
+        self.assertFalse(by_name["B.mp3"]["has_local"])
+
+    def test_state_follows_decision(self):
+        self.client.post("/api/decision",
+                         json={"track_id": self.ids["A.mp3"], "decision": True})
+        rows = self.client.get("/api/library").json()["rows"]
+        state = {r["filename"]: r["state"] for r in rows}
+        self.assertEqual(state["A.mp3"], "confirmed")   # check wins over derived state
+
+    def test_track_returns_full_row(self):
+        r = self.client.get(f"/api/track/{self.ids['A.mp3']}")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["filename"], "A.mp3")
+        self.assertTrue(body["has_local"])
+
+    def test_track_404(self):
+        self.assertEqual(self.client.get("/api/track/999999").status_code, 404)
+
+
+class TrackStateUnitTest(unittest.TestCase):
+    """main._track_state branch logic in isolation."""
+
+    def test_all_branches(self):
+        self.assertEqual(main._track_state({"check": 1, "yt_id": "x"}, True), "confirmed")
+        self.assertEqual(main._track_state({"check": 0, "yt_id": "x"}, True), "rejected")
+        self.assertEqual(main._track_state({"check": None, "yt_id": "x"}, True), "unreviewed")
+        self.assertEqual(main._track_state({"check": None, "yt_id": ""}, True), "file_only")
+        self.assertEqual(main._track_state({"check": None, "yt_id": "x"}, False), "link_only")
+        self.assertEqual(main._track_state({"check": None, "yt_id": ""}, False), "new")
+
+
+class ArtifactsTest(unittest.TestCase):
+    """jobs.artifacts summarizes a script's output files (counts + links)."""
+
+    def setUp(self):
+        import jobs
+        self.jobs = jobs
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig = jobs.REPO_ROOT
+        jobs.REPO_ROOT = self.tmp.name
+
+    def tearDown(self):
+        self.jobs.REPO_ROOT = self._orig
+        self.tmp.cleanup()
+
+    def _write(self, name, text):
+        with open(os.path.join(self.tmp.name, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_line_and_link_counts(self):
+        self._write("ids1.txt", "aaa\nbbb\n\nccc\n")          # blank line ignored -> 3
+        self._write("urls.txt", "u1\nu2\n")
+        self._write("playlists.txt", "https://x/1\nhttps://x/2\n")
+        arts = {a["file"]: a for a in self.jobs.artifacts("url_extractor")}
+        self.assertEqual(arts["ids1.txt"]["count"], 3)
+        self.assertEqual(arts["urls.txt"]["count"], 2)
+        self.assertEqual(arts["playlists.txt"]["count"], 2)
+        self.assertEqual(arts["playlists.txt"]["links"], ["https://x/1", "https://x/2"])
+
+    def test_csv_count_excludes_header(self):
+        self._write("matches.csv", "filename,check\nA.mp3,1\nB.mp3,0\n")
+        art = self.jobs.artifacts("searcher")[0]
+        self.assertEqual(art["count"], 2)          # 3 lines - header
+
+    def test_missing_files_report_zero(self):
+        arts = self.jobs.artifacts("downloader")   # nothing written
+        self.assertTrue(all(a["count"] == 0 and not a["exists"] for a in arts))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

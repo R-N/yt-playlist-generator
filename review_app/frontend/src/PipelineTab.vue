@@ -1,122 +1,156 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { api } from './api'
 
-const scripts = ref([])         // catalog: {name, script, desc, destructive}
-const selected = ref(null)      // active script name
-const job = ref({ status: 'idle', lines: [], returncode: null })
+// Friendly name / icon / pipeline stage per script. The backend catalog gives
+// the raw name + description + destructive flag; this is just presentation.
+const META = {
+  url_extractor:        { label: 'Extract from dump.csv',  icon: 'mdi-file-delimited-outline', stage: 'Harvest' },
+  playlist_generator:   { label: 'Build playlist links',   icon: 'mdi-playlist-play',          stage: 'Harvest' },
+  downloader:           { label: 'Download audio',         icon: 'mdi-download',               stage: 'Acquire' },
+  searcher:             { label: 'Match local library',    icon: 'mdi-magnify-scan',           stage: 'Match' },
+  filter_local_quality: { label: 'Flag low-quality',       icon: 'mdi-quality-high',           stage: 'Match' },
+  acoustid_enrich:      { label: 'AcoustID cross-check',   icon: 'mdi-fingerprint',            stage: 'Enrich' },
+  check_untracked:      { label: 'List untracked files',   icon: 'mdi-clipboard-list-outline', stage: 'Maintain' },
+  cleanup_downloads:    { label: 'Clean failed downloads', icon: 'mdi-broom',                  stage: 'Maintain' },
+  cleanup_tracked:      { label: 'Delete verified sources', icon: 'mdi-delete-sweep',          stage: 'Maintain' },
+}
+const STAGES = ['Harvest', 'Acquire', 'Match', 'Enrich', 'Maintain']
+
+const catalog = ref([])
+const states = reactive({})        // name -> job state (status, artifacts, lines, ...)
+const showLog = reactive({})       // name -> bool
 const error = ref('')
 let poll = null
 
-const current = computed(() => scripts.value.find((s) => s.name === selected.value) || null)
+const meta = (n) => META[n] || { label: n, icon: 'mdi-cog', stage: 'Maintain' }
+const stageScripts = (stage) => catalog.value.filter((s) => meta(s.name).stage === stage)
+const statusColor = (s) =>
+  ({ running: 'info', done: 'success', failed: 'error', stopped: 'warning' }[s] || 'grey')
 
 async function loadCatalog() {
-  scripts.value = await api.scripts()
-  if (scripts.value.length && !selected.value) select(scripts.value[0].name)
+  catalog.value = await api.scripts()
+  await Promise.all(catalog.value.map((s) => refresh(s.name)))
 }
 
-async function select(name) {
-  selected.value = name
-  await refresh()
-}
-
-async function refresh() {
-  if (!selected.value) return
+async function refresh(name) {
   try {
-    job.value = await api.scriptState(selected.value, 400)
+    states[name] = await api.scriptState(name, 200)
   } catch (e) {
     error.value = String(e)
   }
 }
 
-async function run() {
+async function run(s) {
   error.value = ''
-  // destructive scripts delete files on disk — require a typed confirmation
-  if (current.value?.destructive) {
+  if (s.destructive) {
     const answer = window.prompt(
-      `"${selected.value}" DELETES files on disk and cannot be undone.\n` +
-      `Type DELETE to run it.`)
+      `"${meta(s.name).label}" DELETES files on disk and cannot be undone.\nType DELETE to run it.`)
     if (answer !== 'DELETE') { error.value = 'cancelled'; return }
   }
   try {
-    await api.scriptRun(selected.value)
-    await refresh()
+    await api.scriptRun(s.name)
+    await refresh(s.name)
   } catch (e) {
     error.value = String(e)
   }
 }
 
-async function stop() {
-  try {
-    await api.scriptStop(selected.value)
-    await refresh()
-  } catch (e) {
-    error.value = String(e)
-  }
+async function stop(name) {
+  try { await api.scriptStop(name); await refresh(name) }
+  catch (e) { error.value = String(e) }
 }
 
-const statusColor = (s) =>
-  ({ running: 'blue', done: 'green', failed: 'red', stopped: 'orange' }[s] || 'grey')
+async function copyLinks(links) {
+  try { await navigator.clipboard.writeText(links.join('\n')) } catch {}
+}
 
 onMounted(() => {
   loadCatalog()
-  poll = setInterval(refresh, 1500)   // live-ish log + status
+  // Poll only running jobs; localhost + cheap, keeps result stats fresh live.
+  poll = setInterval(() => {
+    for (const s of catalog.value) if (states[s.name]?.status === 'running') refresh(s.name)
+  }, 1500)
 })
 onUnmounted(() => clearInterval(poll))
 </script>
 
 <template>
-  <v-container fluid>
-    <div class="text-h6 mb-1">Pipeline scripts</div>
-    <div class="text-caption text-grey mb-4">
-      Run a repo script as a background job and watch its output. Each script's
-      behavior is set by the constants at the top of its file (and the keys on the
-      Settings tab); this just launches and monitors it. Long jobs (download, scan)
-      keep running on the server even if you switch tabs.
+  <div class="d-flex align-center mb-1" style="gap:10px">
+    <div class="text-h6">Pipeline</div>
+    <div class="text-caption text-medium-emphasis">
+      Run a step, see its result. Each runs on the server; you can leave the tab.
     </div>
+  </div>
 
-    <v-alert v-if="error" type="error" class="mb-3" closable @click:close="error=''">
-      {{ error }}
-    </v-alert>
+  <v-alert v-if="error" type="error" density="compact" class="mb-3" closable @click:close="error=''">
+    {{ error }}
+  </v-alert>
 
-    <v-row>
-      <v-col cols="12" md="4">
-        <v-list density="compact" nav>
-          <v-list-item v-for="s in scripts" :key="s.name"
-            :active="s.name === selected" @click="select(s.name)">
-            <v-list-item-title>
-              {{ s.name }}
-              <v-icon v-if="s.destructive" color="red" size="x-small" icon="mdi-delete-alert" />
-            </v-list-item-title>
-            <v-list-item-subtitle>{{ s.desc }}</v-list-item-subtitle>
-          </v-list-item>
-        </v-list>
-      </v-col>
+  <div v-for="stage in STAGES" :key="stage">
+    <template v-if="stageScripts(stage).length">
+      <div class="text-overline text-medium-emphasis mt-4 mb-1">{{ stage }}</div>
+      <v-row>
+        <v-col v-for="s in stageScripts(stage)" :key="s.name" cols="12" md="6">
+          <v-card class="pa-4 h-100" variant="outlined">
+            <div class="d-flex align-center mb-1" style="gap:10px">
+              <v-icon :color="s.destructive ? 'error' : 'primary'">{{ meta(s.name).icon }}</v-icon>
+              <div class="text-subtitle-1 font-weight-medium">{{ meta(s.name).label }}</div>
+              <v-spacer />
+              <v-chip v-if="states[s.name]" :color="statusColor(states[s.name].status)"
+                size="small" variant="tonal">
+                <v-progress-circular v-if="states[s.name].status==='running'" indeterminate
+                  size="12" width="2" class="mr-1" />
+                {{ states[s.name].status }}
+              </v-chip>
+            </div>
+            <div class="text-caption text-medium-emphasis mb-3">{{ s.desc }}</div>
 
-      <v-col cols="12" md="8">
-        <v-card v-if="selected" class="pa-3">
-          <div class="d-flex align-center mb-2">
-            <div class="text-subtitle-1">{{ selected }}</div>
-            <v-chip :color="statusColor(job.status)" size="small" class="ml-3">
-              {{ job.status }}<span v-if="job.returncode!=null"> ({{ job.returncode }})</span>
-            </v-chip>
-            <v-chip v-if="current?.destructive" color="red" size="small" class="ml-2">
-              deletes files
-            </v-chip>
-            <v-spacer />
-            <v-btn :color="current?.destructive ? 'red' : 'primary'" size="small" class="mr-2"
-              :disabled="job.status==='running'" @click="run">Run</v-btn>
-            <v-btn color="orange" size="small" variant="tonal"
-              :disabled="job.status!=='running'" @click="stop">Stop</v-btn>
-          </div>
-          <v-sheet color="black" class="pa-2" rounded
-            style="height: 420px; overflow:auto; font-family: monospace; font-size: 12px">
-            <div v-if="!job.lines.length" class="text-grey">— no output yet —</div>
-            <div v-for="(l, i) in job.lines" :key="i" class="text-green-lighten-2"
-              style="white-space: pre-wrap">{{ l }}</div>
-          </v-sheet>
-        </v-card>
-      </v-col>
-    </v-row>
-  </v-container>
+            <!-- Human result: counts + clickable playlist links -->
+            <div v-if="states[s.name]?.artifacts?.length" class="mb-3">
+              <div class="d-flex flex-wrap" style="gap:8px">
+                <v-chip v-for="a in states[s.name].artifacts" :key="a.file"
+                  size="small" :variant="a.exists ? 'tonal' : 'text'"
+                  :color="a.exists ? 'primary' : undefined">
+                  <span class="font-weight-bold mr-1">{{ a.count }}</span> {{ a.label }}
+                </v-chip>
+              </div>
+              <template v-for="a in states[s.name].artifacts" :key="a.file + '-links'">
+                <div v-if="a.kind==='links' && a.links?.length" class="mt-2">
+                  <div class="d-flex align-center">
+                    <div class="text-caption text-medium-emphasis">Playlist links</div>
+                    <v-btn size="x-small" variant="text" prepend-icon="mdi-content-copy"
+                      class="ml-2" @click="copyLinks(a.links)">Copy</v-btn>
+                  </div>
+                  <a v-for="(l, i) in a.links" :key="i" :href="l" target="_blank" rel="noopener"
+                    class="d-block text-caption text-truncate text-primary">{{ l }}</a>
+                </div>
+              </template>
+            </div>
+
+            <div class="d-flex align-center" style="gap:8px">
+              <v-btn :color="s.destructive ? 'error' : 'primary'" variant="flat"
+                :prepend-icon="s.destructive ? 'mdi-delete-alert' : 'mdi-play'"
+                :disabled="states[s.name]?.status==='running'" @click="run(s)">Run</v-btn>
+              <v-btn v-if="states[s.name]?.status==='running'" color="warning" variant="tonal"
+                prepend-icon="mdi-stop" @click="stop(s.name)">Stop</v-btn>
+              <v-spacer />
+              <v-btn size="small" variant="text"
+                :append-icon="showLog[s.name] ? 'mdi-chevron-up' : 'mdi-chevron-down'"
+                @click="showLog[s.name] = !showLog[s.name]">Log</v-btn>
+            </div>
+
+            <v-expand-transition>
+              <v-sheet v-show="showLog[s.name]" color="black" rounded class="pa-2 mt-3"
+                style="max-height:260px; overflow:auto; font-family:monospace; font-size:12px">
+                <div v-if="!states[s.name]?.lines?.length" class="text-grey">— no output yet —</div>
+                <div v-for="(l, i) in states[s.name]?.lines || []" :key="i"
+                  class="text-green-lighten-2" style="white-space:pre-wrap">{{ l }}</div>
+              </v-sheet>
+            </v-expand-transition>
+          </v-card>
+        </v-col>
+      </v-row>
+    </template>
+  </div>
 </template>

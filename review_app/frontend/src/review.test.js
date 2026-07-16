@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed, confidenceColor } from './review'
+import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed, confidenceColor,
+  stateMeta, filterLibrary } from './review'
 
 describe('keyToAction', () => {
   it('maps approve keys', () => {
@@ -56,5 +57,34 @@ describe('confidenceColor', () => {
     expect(confidenceColor('weak')).toBe('amber')
     expect(confidenceColor('none')).toBe('grey')
     expect(confidenceColor(undefined)).toBe('grey')
+  })
+})
+
+describe('stateMeta', () => {
+  it('maps known states, falls back for unknown', () => {
+    expect(stateMeta('confirmed').color).toBe('success')
+    expect(stateMeta('link_only').label).toBe('Link only')
+    expect(stateMeta('???').color).toBe('grey')
+  })
+})
+
+describe('filterLibrary', () => {
+  const rows = [
+    { state: 'confirmed', artist: 'YOASOBI', title: 'Idol', filename: 'idol.mp3', yt_title: '', yt_channel: '' },
+    { state: 'unreviewed', artist: 'Ado', title: 'Usseewa', filename: 'ado.mp3', yt_title: 'Ado - Usseewa', yt_channel: 'Ado' },
+    { state: 'file_only', artist: '', title: '', filename: 'mystery.mp3', yt_title: '', yt_channel: '' },
+  ]
+  it('all + empty query returns everything', () => {
+    expect(filterLibrary(rows, 'all', '')).toHaveLength(3)
+  })
+  it('filters by state', () => {
+    expect(filterLibrary(rows, 'confirmed', '').map(r => r.artist)).toEqual(['YOASOBI'])
+  })
+  it('searches across visible fields, case-insensitive', () => {
+    expect(filterLibrary(rows, 'all', 'ado')).toHaveLength(1)
+    expect(filterLibrary(rows, 'all', 'MYSTERY')).toHaveLength(1)
+  })
+  it('state and query combine (AND)', () => {
+    expect(filterLibrary(rows, 'confirmed', 'ado')).toHaveLength(0)
   })
 })

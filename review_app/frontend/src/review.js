@@ -33,3 +33,29 @@ export function youtubeEmbed(id) {
 export function confidenceColor(conf) {
   return { strong: 'green', weak: 'amber', none: 'grey' }[conf] || 'grey'
 }
+
+// Library track states (server-derived in main._track_state) -> display meta.
+export const STATE_META = {
+  confirmed:  { label: 'Confirmed',  color: 'success', icon: 'mdi-check-decagram' },
+  unreviewed: { label: 'Unreviewed', color: 'grey',    icon: 'mdi-help-circle-outline' },
+  rejected:   { label: 'Rejected',   color: 'error',   icon: 'mdi-close-circle-outline' },
+  file_only:  { label: 'File only',  color: 'info',    icon: 'mdi-file-music-outline' },
+  link_only:  { label: 'Link only',  color: 'warning', icon: 'mdi-link-variant' },
+  new:        { label: 'New',        color: 'purple',  icon: 'mdi-new-box' },
+}
+
+export function stateMeta(state) {
+  return STATE_META[state] || { label: state || '—', color: 'grey', icon: 'mdi-music' }
+}
+
+// Filter library rows by state ('all' = any) and a free-text query over the
+// human-visible fields. Pure so it's unit-tested in review.test.js.
+export function filterLibrary(rows, state = 'all', query = '') {
+  const q = query.trim().toLowerCase()
+  return rows.filter((r) => {
+    if (state !== 'all' && r.state !== state) return false
+    if (!q) return true
+    return [r.artist, r.title, r.filename, r.yt_title, r.yt_channel]
+      .some((v) => v && String(v).toLowerCase().includes(q))
+  })
+}

@@ -86,6 +86,58 @@ def api_rows(status: str = "all", limit: int = 200, offset: int = 0):
     return {"rows": rows, "total": total}
 
 
+def _track_state(r, has_local):
+    """One digestible state per track, driving the Library list's colored chip.
+    check wins (a human decided); otherwise describe what the row has."""
+    if r.get("check") == 1:
+        return "confirmed"
+    if r.get("check") == 0:
+        return "rejected"
+    has_link = bool(r.get("yt_id"))
+    if has_local and has_link:
+        return "unreviewed"
+    if has_local:
+        return "file_only"
+    if has_link:
+        return "link_only"
+    return "new"
+
+
+# Slim fields the library list needs — keeps the all-rows payload small.
+_LIB_FIELDS = ("id", "artist", "title", "filename", "yt_id", "yt_channel",
+               "yt_title", "duration", "check")
+
+
+@app.get("/api/library")
+def api_library():
+    """All tracks, trimmed + tagged with a state, for the browse/list view."""
+    rows, total = db.get_rows(status="all", limit=1_000_000, offset=0)
+    out = []
+    for r in rows:
+        has_local = r["filename"] in _FILE_INDEX
+        item = {k: r.get(k) for k in _LIB_FIELDS}
+        item["has_local"] = has_local
+        item["state"] = _track_state(r, has_local)
+        out.append(item)
+    return {"rows": out, "total": total}
+
+
+@app.get("/api/track/{track_id}")
+def api_track(track_id: int):
+    """Full expanded row for one track (mb_*, sims, everything) — used when the
+    Library list hands a row off to the Review view."""
+    conn = db.connect()
+    try:
+        row = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="track not found")
+    r = db._expand_extra(dict(row))
+    r["has_local"] = r["filename"] in _FILE_INDEX
+    return r
+
+
 @app.post("/api/decision")
 def api_decision(d: Decision):
     global _decision_count

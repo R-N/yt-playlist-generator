@@ -36,6 +36,53 @@ SCRIPTS = {
 }
 
 
+# What each script produces, so the UI can show a human result (counts + links)
+# instead of raw stdout. (file, label, kind) — kind: "lines" | "csv" | "links".
+# ponytail: shows current file totals, not this-run deltas; the append-only logs
+# (downloaded_ids.txt, matches.csv) make a true delta costlier than it's worth.
+ARTIFACTS = {
+    "url_extractor":        [("ids1.txt", "video ids", "lines"), ("urls.txt", "urls", "lines"), ("playlists.txt", "playlist links", "links")],
+    "playlist_generator":   [("playlists.txt", "playlist links", "links")],
+    "downloader":           [("downloaded_ids.txt", "downloaded", "lines"), ("error_ids.txt", "failed", "lines")],
+    "searcher":             [("matches.csv", "matched rows", "csv")],
+    "filter_local_quality": [("ids2.txt", "flagged for redownload", "lines")],
+    "acoustid_enrich":      [("matches.csv", "rows", "csv")],
+    "check_untracked":      [("untracked.txt", "untracked files", "lines")],
+    "cleanup_downloads":    [("downloaded_ids.txt", "downloads remaining", "lines")],
+    "cleanup_tracked":      [("matches.csv", "tracked rows", "csv")],
+}
+
+
+def _count_lines(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return sum(1 for ln in f if ln.strip())
+    except OSError:
+        return 0
+
+
+def artifacts(name):
+    """Summarize a script's output files for human display (counts + playlist links)."""
+    out = []
+    for fname, label, kind in ARTIFACTS.get(name, []):
+        path = os.path.join(REPO_ROOT, fname)
+        exists = os.path.isfile(path)
+        item = {"file": fname, "label": label, "kind": kind, "exists": exists}
+        if kind == "links":
+            lines = []
+            if exists:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    lines = [ln.strip() for ln in f if ln.strip()]
+            item["count"] = len(lines)
+            item["links"] = lines[:20]          # cap payload; a few playlist urls is plenty
+        elif kind == "csv":
+            item["count"] = max(0, _count_lines(path) - 1) if exists else 0
+        else:
+            item["count"] = _count_lines(path) if exists else 0
+        out.append(item)
+    return out
+
+
 class _Job:
     def __init__(self):
         self.proc = None
@@ -115,4 +162,5 @@ def state(name, tail=None):
         "returncode": job.returncode,
         "started": job.started,
         "lines": lines,
+        "artifacts": artifacts(name),
     }

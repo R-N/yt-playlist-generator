@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from './api'
+import { activeTab, focusTrack } from './nav'
 import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed, confidenceColor } from './review'
 
 const counts = ref({ total: 0, unreviewed: 0, approved: 0, rejected: 0 })
@@ -11,6 +12,7 @@ const loading = ref(false)
 const error = ref('')
 const exporting = ref('')
 const details = ref(false)
+const fromLibrary = ref(false)   // reviewing a single track handed over by the Library
 
 const current = computed(() => queue.value[idx.value] || null)
 const reviewed = computed(() => counts.value.approved + counts.value.rejected)
@@ -50,11 +52,32 @@ async function decide(approve) {
   try {
     await api.decide(t.id, approve)
     t.check = approve ? 1 : 0
-    advance()
+    if (fromLibrary.value) exitFocus()      // one-off from the list: done, go back
+    else advance()
     refreshCounts()
   } catch (e) {
     error.value = String(e)
   }
+}
+
+// Review a single track handed over from the Library list.
+watch(focusTrack, (t) => {
+  if (!t) return
+  queue.value = [t]
+  idx.value = 0
+  fromLibrary.value = true
+})
+
+function exitFocus() {
+  focusTrack.value = null
+  fromLibrary.value = false
+  loadQueue()
+}
+
+function backToLibrary() {
+  focusTrack.value = null
+  fromLibrary.value = false
+  activeTab.value = 'library'
 }
 
 function advance() {
@@ -120,6 +143,16 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
       <span class="text-medium-emphasis">? {{ counts.unreviewed }}</span>
     </div>
   </div>
+
+  <v-alert v-if="fromLibrary" type="info" variant="tonal" density="compact" class="mb-4">
+    <div class="d-flex align-center">
+      Reviewing one track from the Library.
+      <v-spacer />
+      <v-btn size="small" variant="text" prepend-icon="mdi-arrow-left" @click="backToLibrary">
+        Back to Library
+      </v-btn>
+    </div>
+  </v-alert>
 
   <v-alert v-if="error" type="error" closable class="mb-4" @click:close="error=''">
     {{ error }}

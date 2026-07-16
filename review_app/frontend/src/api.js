@@ -18,6 +18,8 @@ export const api = {
   counts: () => jget('/api/counts'),
   rows: (status = 'unreviewed', limit = 200, offset = 0) =>
     jget(`/api/rows?status=${status}&limit=${limit}&offset=${offset}`),
+  library: () => jget('/api/library'),
+  track: (id) => jget(`/api/track/${id}`),
   decide: (track_id, decision) => jpost('/api/decision', { track_id, decision }),
   export: () => jpost('/api/export'),
   audioUrl: (id) => `/api/audio/${id}`,

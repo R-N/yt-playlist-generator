@@ -1,12 +1,12 @@
 <script setup>
-import { ref } from 'vue'
 import ReviewTab from './ReviewTab.vue'
+import LibraryTab from './LibraryTab.vue'
 import DiscordTab from './DiscordTab.vue'
 import PlaylistTab from './PlaylistTab.vue'
 import PipelineTab from './PipelineTab.vue'
 import SettingsTab from './SettingsTab.vue'
+import { activeTab as tab } from './nav'
 
-const tab = ref('review')
 const tools = [
   { value: 'discord', icon: 'mdi-discord', label: 'Discord harvest' },
   { value: 'playlist', icon: 'mdi-playlist-play', label: 'Playlist links' },
@@ -27,6 +27,9 @@ const tools = [
 
       <v-list nav density="comfortable">
         <v-list-subheader>CURATE</v-list-subheader>
+        <v-list-item :active="tab==='library'" @click="tab='library'"
+          prepend-icon="mdi-library-music" title="Library" rounded="lg"
+          subtitle="browse every track + state" />
         <v-list-item :active="tab==='review'" @click="tab='review'"
           prepend-icon="mdi-check-decagram" title="Review" rounded="lg"
           subtitle="approve / reject by ear" />
@@ -48,6 +51,9 @@ const tools = [
 
     <v-main>
       <v-window v-model="tab">
+        <v-window-item value="library" :eager="true">
+          <div class="tab-wrap"><LibraryTab /></div>
+        </v-window-item>
         <v-window-item value="review" :eager="true">
           <div class="tab-wrap"><ReviewTab /></div>
         </v-window-item>
