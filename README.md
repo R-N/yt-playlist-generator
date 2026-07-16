@@ -7,7 +7,7 @@ The root scripts are standalone — run each directly with `python <script>.py`,
 ## Requirements
 
 - Python 3
-- `pip install yt-dlp pandas mutagen rapidfuzz pykakasi`
+- `pip install -r requirements.txt` (yt-dlp, pandas, mutagen, rapidfuzz, pykakasi, openpyxl)
 - [`ffmpeg`](https://ffmpeg.org/) on your `PATH` (used by yt-dlp for audio extraction)
 
 Only `playlist_generator.py` needs nothing beyond Python — the rest pull in the packages above.
@@ -34,6 +34,8 @@ Only `playlist_generator.py` needs nothing beyond Python — the rest pull in th
 | `searcher.py` | Scans the local folders in `MP3_FOLDERS`, searches YouTube for the source video of each MP3, scores the candidates, and writes the best match per file to `matches.csv`. |
 | `filter_local_quality.py` | Flags rows whose local mp3 is already ≥ 192 kbps (so the YouTube re-download is unwanted), adds `local_bitrate` / `local_better` columns, and writes a filtered download list to `ids2.txt`. |
 | `acoustid_enrich.py` | Cross-checks each local mp3 against the AcoustID + MusicBrainz database (Picard's engine): fingerprints the audio, looks it up, and writes canonical `mb_artist`/`mb_title`/`mb_recording_id`/`ac_score` plus an `mb_confidence` + `mb_suggest` cross-check vs the YouTube match. Language-independent, so it catches wrong Japanese matches. Needs `fpcalc`, `pyacoustid`, and `ACOUSTID_API_KEY` (see review_app/README). Resumable. |
+| `mb_enrich.py` | Text-search fallback to `acoustid_enrich.py`: looks each `matches.csv` row up in MusicBrainz by `artist`/`title` (no audio, no fpcalc, no key) and fills the same `mb_*` columns on rows the fingerprint pass left blank. Resumable. |
+| `lyrics_fetch.py` | Fetches lyrics for each mp3 in `MP3_FOLDERS` (LRCLIB first, then NetEase / Kugou / J-Lyric fallbacks) and writes a `.lrc` (synced) or `.txt` sidecar next to the file. Skips files that already have one. Resumable. |
 | `cleanup_downloads.py` | Deletes failed, partial, and zero-byte files left in `downloads/` and removes their IDs from `downloaded_ids.txt`. |
 | `check_untracked.py` | Lists library files not yet verified in `matches.csv`, writing them to `untracked.txt`. |
 | `cleanup_tracked.py` | Deletes source MP3s that are already verified in `matches.csv`. |

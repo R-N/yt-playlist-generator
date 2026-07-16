@@ -19,6 +19,8 @@ python downloader.py             # ids.txt -> downloads/ (audio via yt-dlp)
 python searcher.py               # scans MP3_FOLDERS -> matches.csv
 python filter_local_quality.py   # flag tracks whose local mp3 >= 192 kbps -> ids2.txt
 python acoustid_enrich.py        # AcoustID/MusicBrainz cross-check -> mb_* columns
+python mb_enrich.py              # text-search MusicBrainz fallback -> fills blank mb_* rows
+python lyrics_fetch.py           # LRCLIB lyrics -> .lrc/.txt sidecars in MP3_FOLDERS
 python cleanup_downloads.py [ext...]   # delete failed/partial/zero-byte downloads
 python check_untracked.py        # matches.csv -> untracked.txt (unverified files)
 python cleanup_tracked.py        # delete source MP3s already verified in matches.csv
@@ -31,7 +33,7 @@ python install.py    # one-time: pip + npm deps   (or install.bat / .ps1 / .sh)
 python run.py        # build frontend + serve SPA+API on :8000   (run.py --dev = hot reload)
 ```
 
-Dependencies for the root scripts (no `requirements.txt`): `yt-dlp`, `pandas`, `mutagen`, `rapidfuzz`, `pykakasi`. `ffmpeg` must be on PATH (yt-dlp post-processing). `acoustid` + `fpcalc` + `ACOUSTID_API_KEY` are needed only for `acoustid_enrich.py` (imported lazily). The review app has its own `review_app/backend/requirements.txt` (`fastapi`, `uvicorn`, `pandas`, `openpyxl`; `httpx` for tests).
+Dependencies for the root scripts are in the root `requirements.txt` (`pip install -r requirements.txt`): `yt-dlp`, `pandas`, `mutagen`, `rapidfuzz`, `pykakasi`, `openpyxl`. `ffmpeg` must be on PATH (yt-dlp post-processing). `mb_enrich.py` and `lyrics_fetch.py` add no deps (stdlib `urllib` to MusicBrainz / LRCLIB). `acoustid` + `fpcalc` + `ACOUSTID_API_KEY` are needed only for `acoustid_enrich.py` (imported lazily). The review app has its own `review_app/backend/requirements.txt` (`fastapi`, `uvicorn`, `pandas`, `openpyxl`; `httpx` for tests).
 
 ## Pipeline / data flow
 

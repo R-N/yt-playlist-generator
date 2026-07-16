@@ -1,0 +1,66 @@
+"""
+Tests for searcher.py's score() heuristic (stdlib unittest).
+
+    python -m unittest test_searcher -v
+
+Pure scoring logic — no network, no disk. (Runnable only because searcher.py now
+guards main() behind __name__ == "__main__"; importing it used to scan MP3_FOLDERS.)
+"""
+import unittest
+
+import searcher
+
+
+def _entry(uploader="", uploader_id="", title="", views=1000, ext="opus"):
+    return {
+        "uploader": uploader,
+        "uploader_id": uploader_id,
+        "title": title,
+        "view_count": views,
+        "formats": [{"vcodec": "none", "abr": 160, "ext": ext, "acodec": ext}],
+    }
+
+
+class ScoreTest(unittest.TestCase):
+    def test_topic_channel_beats_random_fan_channel(self):
+        topic = _entry("Radiohead - Topic", "UCabcdefghij", "Creep")
+        fan = _entry("Radiohead Fans Forever", "", "Creep")
+        self.assertGreater(
+            searcher.score(topic, "Radiohead", "Creep"),
+            searcher.score(fan, "Radiohead", "Creep"),
+        )
+
+    def test_unwanted_version_penalized_when_absent_from_query(self):
+        clean = _entry("Radiohead - Topic", "UCabcdefghij", "Creep")
+        live = _entry("Radiohead - Topic", "UCabcdefghij", "Creep (Live)")
+        self.assertGreater(
+            searcher.score(clean, "Radiohead", "Creep"),
+            searcher.score(live, "Radiohead", "Creep"),
+        )
+
+    def test_unwanted_term_not_penalized_when_sought(self):
+        # Same 'Live' title, but the query asks for it — penalty must NOT apply.
+        live = _entry("Radiohead - Topic", "UCabcdefghij", "Creep (Live)")
+        penalized = searcher.score(live, "Radiohead", "Creep")
+        sought = searcher.score(live, "Radiohead", "Creep Live")
+        self.assertGreater(sought, penalized)
+
+    def test_nightcore_penalized_only_when_unsought(self):
+        nc = _entry("Nightcore Releases", "UCabcdefghij", "Creep (Nightcore)")
+        # sought in title query -> no penalty; unsought -> penalty
+        self.assertGreater(
+            searcher.score(nc, "Radiohead", "Creep Nightcore"),
+            searcher.score(nc, "Radiohead", "Creep"),
+        )
+
+    def test_prefers_better_audio_format(self):
+        opus = _entry("Radiohead - Topic", "UCabcdefghij", "Creep", ext="opus")
+        mp3 = _entry("Radiohead - Topic", "UCabcdefghij", "Creep", ext="mp3")
+        self.assertGreater(
+            searcher.score(opus, "Radiohead", "Creep"),
+            searcher.score(mp3, "Radiohead", "Creep"),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

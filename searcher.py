@@ -212,7 +212,7 @@ def score(entry, artist, query_title="", max_views=1, preferred_formats=["opus",
             score -= penalty
     if 'the first take' in channel and 'the first take' not in artist and 'the first take' not in query_title:
         score -= 25
-    if ('nightcore' in title or 'nightcore' in channel) and ('nightcore' not in query_title or 'nightcore' not in artist):
+    if ('nightcore' in title or 'nightcore' in channel) and ('nightcore' not in query_title and 'nightcore' not in artist):
         score -= 100
 
     # 6. Audio quality / format preference
@@ -554,4 +554,5 @@ def main():
 
     print("Done.")
 
-main()
+if __name__ == "__main__":
+    main()

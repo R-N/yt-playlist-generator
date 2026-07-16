@@ -1,0 +1,22 @@
+# Root scripts (playlist_generator / url_extractor / discord_* / downloader /
+# searcher / filter_local_quality / cleanup_* / check_untracked). Run directly
+# with `python <script>.py` — nothing to install beyond these.
+#
+#   pip install -r requirements.txt
+#
+# ffmpeg must also be on PATH (yt-dlp audio post-processing) — not a pip package.
+# playlist_generator.py alone needs none of these (stdlib only).
+
+yt-dlp
+pandas
+mutagen
+rapidfuzz
+pykakasi
+openpyxl        # matches.xlsx read/write
+
+# Optional — only acoustid_enrich.py. Also needs `fpcalc` (chromaprint) on PATH
+# and ACOUSTID_API_KEY set. Imported lazily, so skip unless you run that script.
+# pyacoustid
+# musicbrainzngs
+
+# The review app has its own deps: review_app/backend/requirements.txt
