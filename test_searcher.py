@@ -62,5 +62,27 @@ class ScoreTest(unittest.TestCase):
         )
 
 
+class ParseTitleTest(unittest.TestCase):
+    def test_splits_on_dash_and_drops_bracket_id(self):
+        self.assertEqual(
+            searcher.parse_title("Radiohead - Creep [dQw4w9WgXcQ]"),
+            ("Radiohead", "Creep"),
+        )
+
+    def test_strips_decoration_noise(self):
+        artist, title = searcher.parse_title("YOASOBI - Idol (Official Music Video)")
+        self.assertEqual(artist, "YOASOBI")
+        self.assertEqual(title, "Idol")
+
+    def test_japanese_bracket_title_form(self):
+        self.assertEqual(searcher.parse_title("米津玄師「Lemon」"), ("米津玄師", "Lemon"))
+
+    def test_no_separator_uses_channel_as_artist(self):
+        self.assertEqual(searcher.parse_title("Creep", channel="Radiohead"), ("Radiohead", "Creep"))
+
+    def test_no_separator_no_channel_keeps_title(self):
+        self.assertEqual(searcher.parse_title("Some Song"), ("", "Some Song"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

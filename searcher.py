@@ -73,16 +73,12 @@ def get_metadata(mp3_path, separators=['-', '–']):
     except Exception as e:
         print(f"Error extracting metadata for {mp3_path}: {e}")
         print(f"Guessing metadata from file name")
-        filename = os.path.splitext(mp3_path)[0]
-        
-        for sep in separators:
-            spaced_sep = f" {sep} "
-            if spaced_sep in filename:
-                artist, title = filename.split(spaced_sep, 1)
-                return artist.strip(), title.strip(), ""
-            if sep in filename:
-                artist, title = filename.split(sep, 1)
-                return artist.strip(), title.strip(), ""
+        # basename only -- the old code split the full path, so a folder like "My-Music"
+        # corrupted the guess. parse_title also drops [ytid]/bracket decorations.
+        stem = os.path.splitext(os.path.basename(mp3_path))[0]
+        artist, title = parse_title(stem)
+        if artist or title:
+            return artist.strip(), title.strip(), ""
         print(f"Failed guessing metadata")
         return "", "", ""
 
@@ -275,6 +271,48 @@ def remove_symbols(query):
     query = re.sub(r'[　「」（）【】《》✧～『』┃║→⚠️🎃♯×📢🎀💌☔☀☽☪🌠◇★♣♠🌟♥ㆁ。♪♫・♡▼▶︎●◆🌷／\、\–\|\"\(\)\[\]\*\#\.\~\-\/\&\,\_\:\|]', ' ', query).strip() 
     query = re.sub(r'\s+', ' ', query).strip()
     return query
+
+# Offline "messy title -> (artist, title)" parser, ported from usb-ldac's ytmeta.py
+# (which itself grew out of this file). Used as the filename-guess fallback in
+# get_metadata() -- handles bracket decorations, JP 「」 title quoting, and noise words
+# that a naive split('-') mangles.
+_TITLE_NOISE = [
+    "official music video", "official video", "official audio", "official mv",
+    "official lyric video", "lyric video", "music video", "official", "full ver",
+    "full version", "full", "mv", "m/v", "audio", "hd", "4k", "hq", "visualizer",
+    "lyrics", "lyric", "color coded", "explicit",
+]
+_TITLE_SEPARATORS = [" - ", " – ", " — ", " ~ ", " / ", "「", "『"]
+_TITLE_CLOSERS = "」』"
+
+def _drop_bracketed(text):
+    # Remove (...) [...] 【...】 groups (feat/official/MV decorations, trailing [ytid]).
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r"\s*[\(\[【][^\(\)\[\]【】]*[\)\]】]\s*", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def parse_title(raw_title, channel=""):
+    """Best-effort (artist, title) from a messy title, offline. Splits on a separator
+    ("Artist - Title", "Artist「Title」") when present; else channel is the artist and the
+    whole cleaned string is the title."""
+    raw = _drop_bracketed(raw_title or "")
+    artist, title = "", raw
+    for sep in _TITLE_SEPARATORS:
+        if sep in raw:
+            left, right = raw.split(sep, 1)
+            if sep in "「『":
+                right = right.rstrip(_TITLE_CLOSERS)
+            artist, title = left.strip(), right.strip()
+            break
+    if not artist:
+        artist = channel or ""
+    title = title.strip().strip(_TITLE_CLOSERS)
+    title = re.sub(r"(?i)\b(" + "|".join(re.escape(w) for w in _TITLE_NOISE) + r")\b", " ", title)
+    title = re.sub(r"\s+", " ", title).strip(" -–—/|")
+    artist = re.sub(r"\s+", " ", artist).strip(" -–—/|")
+    return artist, (title or raw.strip())
 
 def extract_metadata(info, artist="", title="", max_views=1):
     try:
