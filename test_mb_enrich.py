@@ -3,9 +3,18 @@ Tests for mb_enrich.py pure logic (stdlib unittest). No network, no disk.
 
     python -m unittest test_mb_enrich -v
 """
+import json
 import unittest
+from unittest import mock
 
 import mb_enrich as mb
+
+
+def _stub_urlopen(payload):
+    """A urlopen replacement whose context-manager .read() returns json(payload)."""
+    m = mock.MagicMock()
+    m.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+    return m
 
 
 # One recording object shaped like a real MusicBrainz /ws/2/recording response.
@@ -50,6 +59,28 @@ class BlankTest(unittest.TestCase):
         self.assertTrue(mb._blank(float("nan")))
         self.assertFalse(mb._blank("Creep"))
         self.assertFalse(mb._blank(0))
+
+
+class SearchRecordingTest(unittest.TestCase):
+    def test_parses_top_recording_from_stubbed_response(self):
+        payload = {"recordings": [
+            {"id": "r1", "title": "Creep", "score": 99,
+             "artist-credit": [{"name": "Radiohead", "joinphrase": ""}]},
+        ]}
+        with mock.patch("urllib.request.urlopen", _stub_urlopen(payload)):
+            out = mb.search_recording("Radiohead", "Creep")
+        self.assertEqual(out["mb_recording_id"], "r1")
+        self.assertEqual(out["mb_artist"], "Radiohead")
+        self.assertEqual(out["mb_text_score"], 99)
+
+    def test_no_recordings_returns_empty(self):
+        with mock.patch("urllib.request.urlopen", _stub_urlopen({"recordings": []})):
+            self.assertEqual(mb.search_recording("Nobody", "Nothing"), {})
+
+    def test_blank_query_makes_no_request(self):
+        # both terms empty -> must return {} without touching the network
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("should not call")):
+            self.assertEqual(mb.search_recording("", ""), {})
 
 
 if __name__ == "__main__":

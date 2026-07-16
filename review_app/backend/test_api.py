@@ -7,6 +7,7 @@ Redirects db paths AND main.MP3_FOLDERS to a temp dir, so no real data or
 music files are touched. TestClient's context manager fires startup (which
 seeds the DB and builds the read-only file index).
 """
+import json
 import os
 import tempfile
 import unittest
@@ -135,6 +136,29 @@ class AudioTest(ApiTestBase):
     def test_audio_404_unknown_track(self):
         r = self.client.get("/api/audio/999999")
         self.assertEqual(r.status_code, 404)
+
+
+class RowsNanApiTest(ApiTestBase):
+    """End-to-end guard for the NaN-500 bug: a NaN in the DB must serialize through
+    the real Starlette JSON encoder (allow_nan=False), not just db._expand_extra.
+    This is the layer the unit test can't reach — it 500'd in production before."""
+
+    def test_rows_serializes_with_nan_in_db(self):
+        conn = db.connect()
+        try:
+            conn.execute(
+                'UPDATE tracks SET score = ?, extra_json = ? WHERE filename = ?',
+                (float("nan"), json.dumps({"ac_score": float("nan"), "mb_artist": "X"}), "A.mp3"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        r = self.client.get("/api/rows?status=all")
+        self.assertEqual(r.status_code, 200)          # was 500 before the scrub
+        row = next(x for x in r.json()["rows"] if x["filename"] == "A.mp3")
+        self.assertIsNone(row["score"])
+        self.assertIsNone(row["ac_score"])
+        self.assertEqual(row["mb_artist"], "X")
 
 
 class YtAudioTest(ApiTestBase):

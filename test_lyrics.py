@@ -4,6 +4,7 @@ Tests for lyrics_fetch.py pure logic (stdlib unittest). No network, no disk.
     python -m unittest test_lyrics -v
 """
 import unittest
+from unittest import mock
 
 import lyrics_fetch as lf
 
@@ -33,6 +34,25 @@ class HtmlToTextTest(unittest.TestCase):
     def test_br_becomes_newline_tags_stripped_entities_unescaped(self):
         out = lf._html_to_text("line one<br>line &amp; two<br/><b>three</b>")
         self.assertEqual(out, "line one\nline & two\nthree")
+
+
+class FetchLyricsTest(unittest.TestCase):
+    """fetch_lyrics logic + fallback order, with the network stubbed at _get_json."""
+
+    @mock.patch("lyrics_fetch._get_json")
+    def test_lrclib_get_hit_returns_synced(self, gj):
+        gj.return_value = {"syncedLyrics": "[00:01.00]a", "plainLyrics": "a"}
+        self.assertEqual(lf.fetch_lyrics("Radiohead", "Creep", 240), "[00:01.00]a")
+
+    @mock.patch("lyrics_fetch._get_json")
+    def test_falls_back_to_search_when_get_empty(self, gj):
+        # /api/get -> instrumental (no usable lyrics); /api/search -> a plain hit
+        gj.side_effect = [{"instrumental": True}, [{"plainLyrics": "the words"}]]
+        self.assertEqual(lf.fetch_lyrics("A", "B"), "the words")
+
+    def test_no_artist_or_title_returns_empty_without_network(self):
+        with mock.patch("lyrics_fetch._get_json", side_effect=AssertionError("no net")):
+            self.assertEqual(lf.fetch_lyrics("", ""), "")
 
 
 if __name__ == "__main__":

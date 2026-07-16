@@ -7,6 +7,7 @@ Pure scoring logic — no network, no disk. (Runnable only because searcher.py n
 guards main() behind __name__ == "__main__"; importing it used to scan MP3_FOLDERS.)
 """
 import unittest
+from unittest import mock
 
 import searcher
 
@@ -60,6 +61,15 @@ class ScoreTest(unittest.TestCase):
             searcher.score(opus, "Radiohead", "Creep"),
             searcher.score(mp3, "Radiohead", "Creep"),
         )
+
+
+class GetMetadataFallbackTest(unittest.TestCase):
+    @mock.patch("searcher.mutagen.File", side_effect=Exception("unreadable tags"))
+    def test_falls_back_to_parse_title_on_basename(self, _mf):
+        # tag read fails -> parse the basename (not the full path), drop [ytid]
+        artist, title, composer = searcher.get_metadata(
+            "E:/My-Music/Radiohead - Creep [dQw4w9WgXcQ].mp3")
+        self.assertEqual((artist, title, composer), ("Radiohead", "Creep", ""))
 
 
 class ParseTitleTest(unittest.TestCase):
