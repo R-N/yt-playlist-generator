@@ -7,29 +7,62 @@ import PipelineTab from './PipelineTab.vue'
 import SettingsTab from './SettingsTab.vue'
 
 const tab = ref('review')
+const tools = [
+  { value: 'discord', icon: 'mdi-discord', label: 'Discord harvest' },
+  { value: 'playlist', icon: 'mdi-playlist-play', label: 'Playlist links' },
+  { value: 'pipeline', icon: 'mdi-cog-play-outline', label: 'Pipeline jobs' },
+]
 </script>
 
 <template>
   <v-app>
-    <v-app-bar density="comfortable" title="Music Toolkit">
+    <v-navigation-drawer permanent width="224" color="surface">
+      <div class="brand">
+        <v-icon color="primary" size="30">mdi-music-circle</v-icon>
+        <div>
+          <div class="brand-title">Music Curator</div>
+          <div class="brand-sub">match review toolkit</div>
+        </div>
+      </div>
+
+      <v-list nav density="comfortable">
+        <v-list-subheader>CURATE</v-list-subheader>
+        <v-list-item :active="tab==='review'" @click="tab='review'"
+          prepend-icon="mdi-check-decagram" title="Review" rounded="lg"
+          subtitle="approve / reject by ear" />
+
+        <v-divider class="my-2" />
+        <v-list-subheader>TOOLS</v-list-subheader>
+        <v-list-item v-for="t in tools" :key="t.value"
+          :active="tab===t.value" @click="tab=t.value"
+          :prepend-icon="t.icon" :title="t.label" rounded="lg" />
+      </v-list>
+
       <template #append>
-        <v-tabs v-model="tab" density="compact">
-          <v-tab value="review">Review</v-tab>
-          <v-tab value="discord">Discord</v-tab>
-          <v-tab value="playlist">Playlist</v-tab>
-          <v-tab value="pipeline">Pipeline</v-tab>
-          <v-tab value="settings">Settings</v-tab>
-        </v-tabs>
+        <v-list nav density="comfortable">
+          <v-list-item :active="tab==='settings'" @click="tab='settings'"
+            prepend-icon="mdi-tune" title="Settings" rounded="lg" />
+        </v-list>
       </template>
-    </v-app-bar>
+    </v-navigation-drawer>
 
     <v-main>
       <v-window v-model="tab">
-        <v-window-item value="review" :eager="true"><ReviewTab /></v-window-item>
-        <v-window-item value="discord"><DiscordTab /></v-window-item>
-        <v-window-item value="playlist"><PlaylistTab /></v-window-item>
-        <v-window-item value="pipeline"><PipelineTab /></v-window-item>
-        <v-window-item value="settings"><SettingsTab /></v-window-item>
+        <v-window-item value="review" :eager="true">
+          <div class="tab-wrap"><ReviewTab /></div>
+        </v-window-item>
+        <v-window-item value="discord">
+          <div class="tab-wrap"><DiscordTab /></div>
+        </v-window-item>
+        <v-window-item value="playlist">
+          <div class="tab-wrap"><PlaylistTab /></div>
+        </v-window-item>
+        <v-window-item value="pipeline">
+          <div class="tab-wrap"><PipelineTab /></div>
+        </v-window-item>
+        <v-window-item value="settings">
+          <div class="tab-wrap"><SettingsTab /></div>
+        </v-window-item>
       </v-window>
     </v-main>
   </v-app>

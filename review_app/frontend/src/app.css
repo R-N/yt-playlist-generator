@@ -1,0 +1,27 @@
+/* App-wide polish on top of Vuetify. */
+:root { color-scheme: dark; }
+
+body { -webkit-font-smoothing: antialiased; }
+
+/* Centered, comfortable reading width for tab content. */
+.tab-wrap { width: min(100%, 1180px); margin: 0 auto; padding: 20px 20px 48px; }
+
+/* Brand block in the side rail. */
+.brand { display: flex; align-items: center; gap: 10px; padding: 18px 16px 12px; }
+.brand-title { font-weight: 600; font-size: 1.05rem; line-height: 1.1; }
+.brand-sub { font-size: .7rem; opacity: .6; letter-spacing: .04em; }
+
+/* The two compared panels in Review. */
+.panel { border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: 16px; height: 100%; }
+.panel-local { background: linear-gradient(180deg, rgba(182,156,255,.08), transparent 60%); }
+.panel-yt { background: linear-gradient(180deg, rgba(240,97,106,.08), transparent 60%); }
+.panel-head { display: flex; align-items: center; gap: 8px; font-size: .72rem; letter-spacing: .08em; opacity: .7; text-transform: uppercase; margin-bottom: 6px; }
+
+.vs-badge {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+  background: rgb(var(--v-theme-surface-bright)); border: 1px solid rgba(255,255,255,.12);
+  font-size: .72rem; font-weight: 700; opacity: .85; z-index: 2;
+}
+
+audio { width: 100%; }
