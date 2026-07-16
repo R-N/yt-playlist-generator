@@ -53,7 +53,7 @@ Downloading and searching are resumable: re-running skips IDs already logged as 
 
 ## Curation web app (`review_app/`)
 
-Reviewing thousands of matches in a spreadsheet is slow. `review_app/` is a small FastAPI + SQLite + Vue/Vuetify app that plays your local mp3 next to the YouTube candidate (and the MusicBrainz cross-check) so you can approve/reject by ear, one keystroke each. It imports `matches.csv`/`matches.xlsx`, stores curation in SQLite, and exports back to both files (snapshotting backups first). See [`review_app/README.md`](review_app/README.md) for setup, run, and tests.
+Reviewing thousands of matches in a spreadsheet is slow. `review_app/` is a small FastAPI + SQLite + Vue/Vuetify app that plays your local mp3 next to the YouTube candidate (IFrame embed plus an audio-only preview, so you can verify by ear even when the embed is blocked) and the MusicBrainz cross-check, so you can approve/reject by ear, one keystroke each. It imports `matches.csv`/`matches.xlsx`, stores curation in SQLite, and exports back to both files (snapshotting backups first). See [`review_app/README.md`](review_app/README.md) for setup, run, and tests.
 
 `matches.csv` and `matches.xlsx` hold the curation (the `check` column) and are committed to git so the marks are versioned; the `matches - Copy*` files are old manual backups.
 
