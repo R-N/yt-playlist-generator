@@ -332,5 +332,29 @@ class RollbackTest(DbTestBase):
         self.assertIsNone(chk)
 
 
+class ExpandExtraNanTest(unittest.TestCase):
+    """Blank numeric cells arrive as float NaN (core columns and inside extra_json,
+    which json-loads "NaN" back as a float). Starlette's encoder rejects NaN, so
+    _expand_extra must scrub non-finite floats to None or /api/rows 500s."""
+
+    def test_scrubs_nan_from_core_and_extra(self):
+        import json
+        row = {
+            "filename": "x.mp3",
+            "score": float("nan"),                 # core REAL column, blank -> NaN
+            "extra_json": json.dumps({"ac_score": float("nan"), "mb_artist": "Radiohead"}),
+        }
+        out = db._expand_extra(row)
+        self.assertIsNone(out["score"])
+        self.assertIsNone(out["ac_score"])         # NaN from the expanded blob too
+        self.assertEqual(out["mb_artist"], "Radiohead")
+        self.assertNotIn("extra_json", out)
+
+    def test_keeps_finite_values(self):
+        out = db._expand_extra({"score": 42.0, "yt_views": 1000})
+        self.assertEqual(out["score"], 42.0)
+        self.assertEqual(out["yt_views"], 1000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

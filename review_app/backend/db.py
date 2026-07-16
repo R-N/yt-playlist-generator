@@ -14,6 +14,7 @@ Design rules (data-safety):
 """
 import os
 import json
+import math
 import shutil
 import sqlite3
 from datetime import datetime
@@ -220,7 +221,12 @@ def get_rows(status="all", limit=200, offset=0):
 
 def _expand_extra(row):
     """Flatten the extra_json blob back into the row so preserved fields
-    (mb_artist, mb_confidence, acoustid_id, ...) are visible to the API."""
+    (mb_artist, mb_confidence, acoustid_id, ...) are visible to the API.
+
+    Also scrub non-finite floats (NaN/Inf) to None: blank numeric cells arrive as
+    NaN (both from REAL columns and from extra_json, which is seeded with the default
+    allow_nan=True and reads "NaN" back as a float), and Starlette's JSON encoder uses
+    allow_nan=False -- an unscrubbed NaN 500s the whole /api/rows response."""
     extra = row.pop("extra_json", None)
     if extra:
         try:
@@ -228,7 +234,8 @@ def _expand_extra(row):
                 row.setdefault(k, v)
         except (ValueError, TypeError):
             pass
-    return row
+    return {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+            for k, v in row.items()}
 
 
 def counts():
