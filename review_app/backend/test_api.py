@@ -163,6 +163,24 @@ class RowsNanApiTest(ApiTestBase):
         self.assertEqual(row["mb_artist"], "X")
 
 
+class PlaylistApiTest(ApiTestBase):
+    def test_generates_chunked_playlists_from_pasted_urls(self):
+        # 51 ids -> 2 playlists (50 + 1); the tail must not be dropped
+        lines = [f"https://www.youtube.com/watch?v={'a'*10}{i%10}" for i in range(51)]
+        r = self.client.post("/api/playlists", json={"text": "\n".join(lines)})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["id_count"], 51)
+        self.assertEqual(len(body["playlists"]), 2)
+        self.assertTrue(body["playlists"][0].startswith(
+            "https://www.youtube.com/watch_videos?video_ids="))
+
+    def test_empty_input(self):
+        r = self.client.post("/api/playlists", json={"text": "  \n \n"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"id_count": 0, "playlists": []})
+
+
 class YtAudioTest(ApiTestBase):
     """The /api/yt_audio redirect. The resolver is stubbed so no test hits yt-dlp."""
 

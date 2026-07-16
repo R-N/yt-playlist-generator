@@ -24,6 +24,10 @@ import settings
 import discord_service
 from config import MP3_FOLDERS, AUTO_EXPORT_EVERY, REPO_ROOT
 
+if REPO_ROOT not in sys.path:            # reuse the repo-root playlist logic (no duplication)
+    sys.path.insert(0, REPO_ROOT)
+import playlist_generator                # noqa: E402
+
 app = FastAPI(title="Match Review")
 
 # Dev: Vite serves the SPA on :5173 and calls the API on :8000.
@@ -57,9 +61,21 @@ class Decision(BaseModel):
     decision: bool        # True = approve, False = reject
 
 
+class PlaylistReq(BaseModel):
+    text: str = ""        # pasted URLs/ids, one per line
+
+
 @app.get("/api/counts")
 def api_counts():
     return db.counts()
+
+
+@app.post("/api/playlists")
+def api_playlists(req: PlaylistReq):
+    """Turn pasted YouTube URLs/ids into watch_videos playlist URLs (the original
+    playlist_generator, in the browser). Chunks ids in groups of 50."""
+    ids = playlist_generator.extract_ids(req.text.splitlines())
+    return {"id_count": len(ids), "playlists": playlist_generator.build_playlists(ids)}
 
 
 @app.get("/api/rows")

@@ -30,6 +30,9 @@ export const api = {
   // discord harvest
   discordFetch: (body) => jpost('/api/discord/fetch', body),
 
+  // playlist generator (paste URLs -> watch_videos playlist links)
+  playlists: (text) => jpost('/api/playlists', { text }),
+
   // pipeline scripts (background jobs)
   scripts: () => jget('/api/scripts'),
   scriptState: (name, tail) =>

@@ -21,6 +21,9 @@ The UI is tabbed; the original review screen is one of them.
   YouTube video id, and write `ids.txt`/`urls.txt`/`playlists.txt` at the repo
   root (feeds the downloader / playlist flow). Backed by `discord_service.py`,
   which reuses the repo-root `discord_fetch.py` + `discord_extractor.py`.
+- **Playlist** — paste YouTube URLs or 11-char video ids and get `watch_videos`
+  playlist URLs back (ids chunked in groups of 50). The original
+  `playlist_generator.py` in the browser (`POST /api/playlists`).
 - **Pipeline** — run any root script as a background subprocess job and watch its
   log live; Stop cancels it. The scripts are unchanged — the app orchestrates
   them (this keeps the repo's "scripts share files as their interface" design).
