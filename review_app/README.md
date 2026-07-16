@@ -110,10 +110,13 @@ python -m unittest test_api -v                    # API only (needs httpx)
 ```
 - `test_db` — `check` coercion, reconcile (union, xlsx-priority, blank-rescue,
   conflict count, no-marks-lost, csv/xlsx-only, dup-filename), append-only
-  atomic decisions, snapshot-backed atomic export, and non-core column
-  (`extra_json`) round-trip.
-- `test_api` — endpoints, the auto-export-every-N trigger, and the audio
-  endpoint's read-only / `Range` (206) / 404 behavior.
+  atomic decisions, snapshot-backed atomic export, non-core column
+  (`extra_json`) round-trip, and the NaN scrub in `_expand_extra` (blank numeric
+  cells arrive as NaN, which the JSON encoder rejects).
+- `test_api` — endpoints, the auto-export-every-N trigger, the audio endpoint's
+  read-only / `Range` (206) / 404 behavior, the `/api/yt_audio` candidate-preview
+  redirect (id validation, resolver stubbed), and the NaN-serialization guard on
+  `/api/rows` (a NaN in the real DB must serialize, not 500).
 - `test_integrations` — settings `.env` round-trip + secret masking, the Discord
   service (extraction order, embeds, author filter, missing-token error; network
   stubbed), and the job catalog's destructive flags.
