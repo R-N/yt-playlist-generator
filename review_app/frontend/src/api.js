@@ -21,6 +21,7 @@ export const api = {
   decide: (track_id, decision) => jpost('/api/decision', { track_id, decision }),
   export: () => jpost('/api/export'),
   audioUrl: (id) => `/api/audio/${id}`,
+  ytAudioUrl: (ytId) => `/api/yt_audio/${ytId}`,
 
   // settings (.env secrets)
   getSettings: () => jget('/api/settings'),

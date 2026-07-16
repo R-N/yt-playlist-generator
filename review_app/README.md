@@ -7,7 +7,10 @@ candidate, approve/reject with one key. Replaces hand-editing the spreadsheet.
 - **Backend:** FastAPI + SQLite (`backend/`)
 - **Frontend:** Vue 3 + Vuetify 3 via Vite (`frontend/`)
 - Local audio served read-only with HTTP Range (scrubbing works); YouTube
-  candidate shown via the official IFrame embed.
+  candidate shown via the official IFrame embed **and** an audio-only preview
+  (`GET /api/yt_audio/{yt_id}` resolves the candidate's audio with `yt-dlp -g`
+  and redirects the `<audio>` element to it) so you can verify by ear even when
+  the embed is blocked (age-restricted / embedding disabled).
 
 ## Tabs
 

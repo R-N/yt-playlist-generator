@@ -7,10 +7,14 @@ Safety posture:
   - Curation writes go through db.py (append-only decisions + atomic export).
 """
 import os
+import re
+import shutil
+import subprocess
+import sys
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -185,6 +189,42 @@ def api_audio(track_id: int):
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="local file not found")
     return FileResponse(path, media_type="audio/mpeg")
+
+
+_YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def _resolve_yt_audio(yt_id):
+    """Direct audio-stream URL for a YouTube id via `yt-dlp -g`, or None. Network.
+    Pulled out as its own function so tests can stub it without hitting yt-dlp."""
+    yt = shutil.which("yt-dlp")
+    cmd = [yt] if yt else [sys.executable, "-m", "yt_dlp"]
+    cmd += ["-g", "-f", "bestaudio/best", "--no-playlist",
+            f"https://www.youtube.com/watch?v={yt_id}"]
+    cookies = os.path.join(REPO_ROOT, "cookies.txt")   # reuse the repo's exported cookies
+    if os.path.isfile(cookies):
+        cmd += ["--cookies", cookies]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if out.returncode != 0:
+        return None
+    lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+    return lines[0] if lines else None
+
+
+@app.get("/api/yt_audio/{yt_id}")
+def api_yt_audio(yt_id: str):
+    """Resolve a YouTube candidate's audio stream and redirect the <audio> element to
+    it, so a reviewer can verify the match by ear -- works even when the IFrame embed
+    is blocked (age-restricted / embedding disabled). Read-only; touches no files."""
+    if not _YT_ID_RE.match(yt_id):
+        raise HTTPException(status_code=400, detail="invalid youtube id")
+    url = _resolve_yt_audio(yt_id)
+    if not url:
+        raise HTTPException(status_code=502, detail="could not resolve audio (yt-dlp / network / age-gate)")
+    return RedirectResponse(url)
 
 
 # Serve the built SPA if present (frontend/dist). Mount LAST so /api/* wins.

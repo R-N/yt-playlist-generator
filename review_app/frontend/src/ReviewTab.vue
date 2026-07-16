@@ -135,6 +135,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
           <iframe v-if="current.yt_id" width="100%" height="220"
             :src="youtubeEmbed(current.yt_id)"
             frameborder="0" allow="encrypted-media" allowfullscreen />
+          <!-- Audio-only preview: verify by ear even when the embed is blocked
+               (age-restricted / embedding disabled). Resolves via yt-dlp on play. -->
+          <audio v-if="current.yt_id" :src="api.ytAudioUrl(current.yt_id)"
+            controls preload="none" style="width:100%" class="mt-2" />
+          <div class="text-caption text-grey">candidate audio · loads on play</div>
         </v-col>
       </v-row>
 

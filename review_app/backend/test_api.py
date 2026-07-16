@@ -137,5 +137,32 @@ class AudioTest(ApiTestBase):
         self.assertEqual(r.status_code, 404)
 
 
+class YtAudioTest(ApiTestBase):
+    """The /api/yt_audio redirect. The resolver is stubbed so no test hits yt-dlp."""
+
+    def test_invalid_id_rejected_without_calling_yt_dlp(self):
+        r = self.client.get("/api/yt_audio/too-short")   # not 11 valid chars
+        self.assertEqual(r.status_code, 400)
+
+    def test_valid_id_redirects_to_resolved_url(self):
+        orig = main._resolve_yt_audio
+        main._resolve_yt_audio = lambda yid: "https://example.com/s?v=" + yid
+        try:
+            r = self.client.get("/api/yt_audio/dQw4w9WgXcQ", follow_redirects=False)
+            self.assertIn(r.status_code, (302, 307))
+            self.assertEqual(r.headers["location"], "https://example.com/s?v=dQw4w9WgXcQ")
+        finally:
+            main._resolve_yt_audio = orig
+
+    def test_unresolvable_returns_502(self):
+        orig = main._resolve_yt_audio
+        main._resolve_yt_audio = lambda yid: None
+        try:
+            r = self.client.get("/api/yt_audio/dQw4w9WgXcQ")
+            self.assertEqual(r.status_code, 502)
+        finally:
+            main._resolve_yt_audio = orig
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
