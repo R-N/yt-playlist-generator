@@ -105,6 +105,8 @@ class MainInvariantTest(unittest.TestCase):
              "mb_recording_id": None, "yt_channel": "Radiohead - Topic", "yt_title": "Creep"},
             {"filename": "b.mp3", "artist": "X", "title": "Y",
              "mb_recording_id": "OLD", "yt_channel": "", "yt_title": ""},
+            {"filename": "c.mp3", "artist": None, "title": None,
+             "mb_recording_id": None, "yt_channel": "", "yt_title": ""},
         ]).to_csv(mb.MATCHES_CSV, index=False)
 
     def tearDown(self):
@@ -117,14 +119,17 @@ class MainInvariantTest(unittest.TestCase):
                "mb_artist": "Radiohead", "mb_text_score": 95}
         with mock.patch.object(mb, "search_recording", return_value=hit) as sr:
             mb.main()
-            self.assertEqual(sr.call_count, 1)          # only the blank row searched
+            # a: blank id -> searched. b: has id -> skipped. c: no artist/title -> skipped.
+            self.assertEqual(sr.call_count, 1)
 
         out = pd.read_csv(mb.MATCHES_CSV)
         a = out[out.filename == "a.mp3"].iloc[0]
         b = out[out.filename == "b.mp3"].iloc[0]
+        c = out[out.filename == "c.mp3"].iloc[0]
         self.assertEqual(a.mb_recording_id, "NEW")
         self.assertEqual(a.mb_source, "text")
         self.assertEqual(b.mb_recording_id, "OLD")      # never overwritten
+        self.assertEqual(c.mbt_done, 1)                 # blank row still marked done (resumable)
 
         # rerun: every row is mbt_done -> no search happens at all
         with mock.patch.object(mb, "search_recording",

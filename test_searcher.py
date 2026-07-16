@@ -63,6 +63,35 @@ class ScoreTest(unittest.TestCase):
         )
 
 
+class PureHelpersTest(unittest.TestCase):
+    def test_is_valid_youtube_id(self):
+        self.assertTrue(searcher.is_valid_youtube_id("dQw4w9WgXcQ"))
+        self.assertFalse(searcher.is_valid_youtube_id("tooShort"))
+        self.assertFalse(searcher.is_valid_youtube_id("dQw4w9WgXcQextra"))
+
+    def test_extract_video_id_from_filename(self):
+        self.assertEqual(searcher.extract_video_id_from_filename("Song [dQw4w9WgXcQ]"), "dQw4w9WgXcQ")
+        self.assertIsNone(searcher.extract_video_id_from_filename("Song [dQw4w9WgXcQ] trailing"))
+        self.assertIsNone(searcher.extract_video_id_from_filename("no id here"))
+
+    def test_remove_symbols_strips_and_collapses(self):
+        self.assertEqual(searcher.remove_symbols("a「b」  c"), "a b c")
+
+    def test_clean_artist_drops_noise_and_lowercases(self):
+        self.assertEqual(searcher.clean_artist("Radiohead - Topic"), "radiohead")
+
+    def test_clean_query_removes_download_site_noise(self):
+        out = searcher.clean_query("y2mate.com - Creep (320 kbps)", title="Creep")
+        self.assertIn("creep", out.lower())
+        self.assertNotIn("y2mate", out.lower())
+        self.assertNotIn("kbps", out.lower())
+
+    def test_penalized_partial_ratio(self):
+        self.assertEqual(searcher.penalized_partial_ratio("abc", "abc"), 100)
+        # a big length gap pulls an otherwise-perfect substring match below 100
+        self.assertLess(searcher.penalized_partial_ratio("abc", "abc" + "x" * 40), 100)
+
+
 class GetMetadataFallbackTest(unittest.TestCase):
     @mock.patch("searcher.mutagen.File", side_effect=Exception("unreadable tags"))
     def test_falls_back_to_parse_title_on_basename(self, _mf):

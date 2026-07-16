@@ -163,6 +163,21 @@ class MainIntegrationTest(unittest.TestCase):
         with mock.patch.object(te, "mb_search", side_effect=AssertionError("resume must skip")):
             te.main()
 
+    def test_no_confident_match_leaves_tags_but_still_logs(self):
+        song = os.path.join(self.d, "Radiohead - Creep.opus")
+        subprocess.run(
+            ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "1",
+             "-c:a", "libopus", song, "-y"], capture_output=True, check=True)
+        te.FOLDERS = [self.d]
+        te.DONE_LOG = os.path.join(self.d, "done.txt")
+        te.RATE_LIMIT_S = 0
+        te.EMBED_LYRICS = False
+        with mock.patch.object(te, "mb_search", return_value=[]):   # no candidates -> no embed
+            te.main()
+        self.assertIsNone(mutagen.File(song, easy=True).get("title"))   # untouched
+        with open(te.DONE_LOG, encoding="utf-8") as f:
+            self.assertIn("Radiohead - Creep.opus", f.read())          # still marked done
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

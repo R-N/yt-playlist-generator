@@ -56,6 +56,27 @@ class FetchLyricsTest(unittest.TestCase):
         with mock.patch("lyrics_fetch._get_json", side_effect=AssertionError("no net")):
             self.assertEqual(lf.fetch_lyrics("", ""), "")
 
+    @mock.patch("lyrics_fetch._netease_lyrics", return_value="netease words")
+    @mock.patch("lyrics_fetch._get_json")
+    def test_falls_through_to_provider_when_lrclib_empty(self, gj, _ne):
+        gj.side_effect = [{}, []]           # LRCLIB get -> nothing, search -> nothing
+        self.assertEqual(lf.fetch_lyrics("A", "B"), "netease words")
+
+
+class ReadTagsTest(unittest.TestCase):
+    @mock.patch("lyrics_fetch.mutagen.File")
+    def test_reads_artist_title_duration(self, mf):
+        tags = {"artist": ["Radiohead"], "title": ["Creep"]}
+        fake = mock.MagicMock()
+        fake.get.side_effect = lambda k, d=None: tags.get(k, d)
+        fake.info.length = 238.0
+        mf.return_value = fake
+        self.assertEqual(lf.read_tags("x.opus"), ("Radiohead", "Creep", 238.0))
+
+    @mock.patch("lyrics_fetch.mutagen.File", side_effect=Exception("unreadable"))
+    def test_unreadable_returns_blanks(self, _mf):
+        self.assertEqual(lf.read_tags("x.opus"), ("", "", 0))
+
 
 class WriteSidecarTest(unittest.TestCase):
     def test_synced_writes_lrc_plain_writes_txt(self):
