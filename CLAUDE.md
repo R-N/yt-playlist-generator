@@ -21,6 +21,7 @@ python filter_local_quality.py   # flag tracks whose local mp3 >= 192 kbps -> id
 python acoustid_enrich.py        # AcoustID/MusicBrainz cross-check -> mb_* columns
 python mb_enrich.py              # text-search MusicBrainz fallback -> fills blank mb_* rows
 python lyrics_fetch.py           # LRCLIB lyrics -> .lrc/.txt sidecars in MP3_FOLDERS
+python tag_enrich.py             # MusicBrainz -> WRITE canonical tags (+lyrics) into downloaded files
 python cleanup_downloads.py [ext...]   # delete failed/partial/zero-byte downloads
 python check_untracked.py        # matches.csv -> untracked.txt (unverified files)
 python cleanup_tracked.py        # delete source MP3s already verified in matches.csv
@@ -96,4 +97,5 @@ When tuning match quality, adjust the reward/penalty dicts and the fuzzy thresho
 - The repo working tree is messy by design — many `matches - Copy*.csv/.xlsx` snapshots, `tmp*.tmp`, and `*.bak` files are manual backups, not generated artifacts. Don't assume they're safe to delete without asking.
 - `.gitignore` deliberately **tracks** `matches.csv` and `matches.xlsx` (the curation) while ignoring everything else regenerable: the `matches - Copy*` backups, `review_app/backups/`, `review_app/backend/review.db*`, `review_app/frontend/node_modules` + `dist`, `__pycache__`, and the plain-text I/O files. Commit `matches.csv`/`.xlsx` to version the marks.
 - `cleanup_csv.py` and `remove_index.py` are one-off CSV-repair utilities with stale hardcoded filenames (e.g. `mp3_youtube_matches_*.csv`); treat them as references for fixing malformed `matches.csv`, not as part of the regular flow.
+- `tag_enrich.py` is the **only root script that mutates audio files in place** (mutagen `.save()` — it rewrites tags/lyrics on downloaded files). Every other script is read-only on audio except the `cleanup_*` deleters. It gates writes behind a MusicBrainz confidence bar and is resumable via `tag_enriched.txt`; still, it edits your files, so point `FOLDERS` at `downloads/` (or a copy) before a full run.
 - `is_valid_youtube_id()` is now defined locally in `check_untracked.py` and `cleanup_tracked.py` (previously only `searcher.py` had it, so their `get_metadata()` would `NameError`). Both also gained an `if __name__ == "__main__"` guard — important for `cleanup_tracked.py`, which deletes source MP3s and previously ran on import.
