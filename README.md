@@ -56,6 +56,8 @@ Downloading and searching are resumable: re-running skips IDs already logged as 
 
 Reviewing thousands of matches in a spreadsheet is slow. `review_app/` is a small FastAPI + SQLite + Vue/Vuetify app that plays your local mp3 next to the YouTube candidate (IFrame embed plus an audio-only preview, so you can verify by ear even when the embed is blocked) and the MusicBrainz cross-check, so you can approve/reject by ear, one keystroke each. It imports `matches.csv`/`matches.xlsx`, stores curation in SQLite, and exports back to both files (snapshotting backups first). See [`review_app/README.md`](review_app/README.md) for setup, run, and tests.
 
+Shortcut: `setup.bat` and `run.bat` at the repo root just `cd review_app` and forward to `install.py` / `run.py` (e.g. `run.bat --dev`), so you can install and launch the app without changing directories.
+
 `matches.csv` and `matches.xlsx` hold the curation (the `check` column) and are committed to git so the marks are versioned; the `matches - Copy*` files are old manual backups.
 
 Beyond reviewing, the app now hosts the rest of the toolkit so you don't have to drop to a shell:
