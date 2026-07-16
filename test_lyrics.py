@@ -3,6 +3,8 @@ Tests for lyrics_fetch.py pure logic (stdlib unittest). No network, no disk.
 
     python -m unittest test_lyrics -v
 """
+import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -53,6 +55,18 @@ class FetchLyricsTest(unittest.TestCase):
     def test_no_artist_or_title_returns_empty_without_network(self):
         with mock.patch("lyrics_fetch._get_json", side_effect=AssertionError("no net")):
             self.assertEqual(lf.fetch_lyrics("", ""), "")
+
+
+class WriteSidecarTest(unittest.TestCase):
+    def test_synced_writes_lrc_plain_writes_txt(self):
+        with tempfile.TemporaryDirectory() as d:
+            synced = lf.write_sidecar(os.path.join(d, "a.opus"), "[00:01.00]hi")
+            plain = lf.write_sidecar(os.path.join(d, "b.opus"), "just words")
+            self.assertTrue(synced.endswith(".lrc"))
+            self.assertTrue(plain.endswith(".txt"))
+            self.assertTrue(os.path.isfile(synced))
+            with open(synced, encoding="utf-8") as f:
+                self.assertEqual(f.read().strip(), "[00:01.00]hi")
 
 
 if __name__ == "__main__":

@@ -4,8 +4,13 @@ Tests for mb_enrich.py pure logic (stdlib unittest). No network, no disk.
     python -m unittest test_mb_enrich -v
 """
 import json
+import os
+import shutil
+import tempfile
 import unittest
 from unittest import mock
+
+import pandas as pd
 
 import mb_enrich as mb
 
@@ -81,6 +86,50 @@ class SearchRecordingTest(unittest.TestCase):
         # both terms empty -> must return {} without touching the network
         with mock.patch("urllib.request.urlopen", side_effect=AssertionError("should not call")):
             self.assertEqual(mb.search_recording("", ""), {})
+
+
+class MainInvariantTest(unittest.TestCase):
+    """main() must fill blank mb_recording_id rows, NEVER overwrite an existing one
+    (fingerprint results from acoustid_enrich win), and resume via mbt_done."""
+
+    def setUp(self):
+        self._orig = {k: getattr(mb, k) for k in
+                      ("MATCHES_CSV", "MATCHES_XLSX", "RATE_LIMIT_S", "SAVE_EVERY")}
+        self.d = tempfile.mkdtemp()
+        mb.MATCHES_CSV = os.path.join(self.d, "matches.csv")
+        mb.MATCHES_XLSX = os.path.join(self.d, "matches.xlsx")
+        mb.RATE_LIMIT_S = 0
+        mb.SAVE_EVERY = 1000
+        pd.DataFrame([
+            {"filename": "a.mp3", "artist": "Radiohead", "title": "Creep",
+             "mb_recording_id": None, "yt_channel": "Radiohead - Topic", "yt_title": "Creep"},
+            {"filename": "b.mp3", "artist": "X", "title": "Y",
+             "mb_recording_id": "OLD", "yt_channel": "", "yt_title": ""},
+        ]).to_csv(mb.MATCHES_CSV, index=False)
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(mb, k, v)
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_fills_blank_preserves_existing_and_resumes(self):
+        hit = {"mb_recording_id": "NEW", "mb_title": "Creep",
+               "mb_artist": "Radiohead", "mb_text_score": 95}
+        with mock.patch.object(mb, "search_recording", return_value=hit) as sr:
+            mb.main()
+            self.assertEqual(sr.call_count, 1)          # only the blank row searched
+
+        out = pd.read_csv(mb.MATCHES_CSV)
+        a = out[out.filename == "a.mp3"].iloc[0]
+        b = out[out.filename == "b.mp3"].iloc[0]
+        self.assertEqual(a.mb_recording_id, "NEW")
+        self.assertEqual(a.mb_source, "text")
+        self.assertEqual(b.mb_recording_id, "OLD")      # never overwritten
+
+        # rerun: every row is mbt_done -> no search happens at all
+        with mock.patch.object(mb, "search_recording",
+                               side_effect=AssertionError("resume must skip")):
+            mb.main()
 
 
 if __name__ == "__main__":

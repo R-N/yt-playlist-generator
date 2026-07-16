@@ -116,6 +116,53 @@ class EmbedRoundtripTest(unittest.TestCase):
     def test_mp3_id3_path(self):
         self._roundtrip("t.mp3", "libmp3lame")
 
+    def test_m4a_mp4_atom_path(self):
+        self._roundtrip("t.m4a", "aac")
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg needed to synthesize a real audio file")
+class MainIntegrationTest(unittest.TestCase):
+    """The whole feature: a blank-tag file gets a confident MusicBrainz match embedded
+    (+lyrics), is logged to DONE_LOG, and is skipped on a rerun."""
+
+    def setUp(self):
+        self._orig = {k: getattr(te, k) for k in
+                      ("FOLDERS", "DONE_LOG", "RATE_LIMIT_S", "EMBED_LYRICS")}
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(te, k, v)
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_enriches_then_resumes(self):
+        song = os.path.join(self.d, "Radiohead - Creep.opus")   # blank tags -> parse_title
+        subprocess.run(
+            ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "1",
+             "-c:a", "libopus", song, "-y"], capture_output=True, check=True)
+        te.FOLDERS = [self.d]
+        te.DONE_LOG = os.path.join(self.d, "done.txt")
+        te.RATE_LIMIT_S = 0
+        te.EMBED_LYRICS = True
+        hit = {"id": "r1", "score": 100,
+               "tags": {"title": "Creep", "artist": "Radiohead", "album": "Pablo Honey"}}
+        with mock.patch.object(te, "mb_search", return_value=[hit]) as ms, \
+             mock.patch.object(te.lyrics_fetch, "fetch_lyrics", return_value="[00:01.00]la"):
+            te.main()
+            self.assertTrue(ms.called)
+
+        easy = mutagen.File(song, easy=True)
+        self.assertEqual(easy.get("title"), ["Creep"])
+        self.assertEqual(easy.get("album"), ["Pablo Honey"])
+        raw = mutagen.File(song)
+        self.assertTrue(raw.get("LYRICS"))
+        with open(te.DONE_LOG, encoding="utf-8") as f:
+            self.assertIn("Radiohead - Creep.opus", f.read())
+
+        # rerun: file is in DONE_LOG -> mb_search must not be called again
+        with mock.patch.object(te, "mb_search", side_effect=AssertionError("resume must skip")):
+            te.main()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

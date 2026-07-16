@@ -10,7 +10,9 @@ seeds the DB and builds the read-only file index).
 import json
 import os
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -186,6 +188,37 @@ class YtAudioTest(ApiTestBase):
             self.assertEqual(r.status_code, 502)
         finally:
             main._resolve_yt_audio = orig
+
+
+class ResolveYtAudioTest(unittest.TestCase):
+    """_resolve_yt_audio's subprocess handling (yt-dlp stubbed — no network)."""
+
+    def _run(self, returncode, stdout):
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout)
+
+    def test_returns_first_stdout_line(self):
+        with mock.patch("main.subprocess.run",
+                        return_value=self._run(0, "http://a/stream\nhttp://b\n")):
+            self.assertEqual(main._resolve_yt_audio("dQw4w9WgXcQ"), "http://a/stream")
+
+    def test_none_on_nonzero_returncode(self):
+        with mock.patch("main.subprocess.run", return_value=self._run(1, "")):
+            self.assertIsNone(main._resolve_yt_audio("dQw4w9WgXcQ"))
+
+    def test_none_on_subprocess_error(self):
+        with mock.patch("main.subprocess.run", side_effect=OSError("yt-dlp missing")):
+            self.assertIsNone(main._resolve_yt_audio("dQw4w9WgXcQ"))
+
+    def test_cmd_targets_the_requested_id(self):
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return self._run(0, "u\n")
+
+        with mock.patch("main.subprocess.run", side_effect=fake_run):
+            main._resolve_yt_audio("dQw4w9WgXcQ")
+        self.assertIn("https://www.youtube.com/watch?v=dQw4w9WgXcQ", captured["cmd"])
 
 
 if __name__ == "__main__":
