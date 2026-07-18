@@ -7,6 +7,7 @@ subprocesses inherit them, and persisted to .env so they survive a restart.
 Real environment variables win over .env (apply_to_environ uses setdefault),
 so `set DISCORD_BOT_TOKEN=...` in the shell still overrides the file.
 """
+import json
 import os
 
 from config import REPO_ROOT
@@ -14,9 +15,78 @@ from config import REPO_ROOT
 ENV_PATH = os.path.join(REPO_ROOT, ".env")
 
 # Keys the Settings page manages. Anything else in .env is preserved untouched.
-MANAGED_KEYS = ["DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID", "ACOUSTID_API_KEY"]
+MANAGED_KEYS = [
+    "DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID", "ACOUSTID_API_KEY",
+    "MP3_FOLDERS_JSON", "DOWNLOAD_FOLDER",
+]
 # Which of those are secret -> never returned in full to the client.
 SECRET_KEYS = {"DISCORD_BOT_TOKEN", "ACOUSTID_API_KEY"}
+_APP_OWNED_ENV = {}
+
+
+def parse_mp3_folders(value):
+    """Validate and normalize configured local music folders."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError("MP3_FOLDERS_JSON must be a JSON list") from e
+    if not isinstance(value, list):
+        raise ValueError("MP3_FOLDERS_JSON must be a JSON list")
+    out = []
+    seen = set()
+    for folder in value:
+        if not isinstance(folder, str) or not folder.strip():
+            raise ValueError("MP3 folder paths must be nonempty strings")
+        if not os.path.isabs(folder):
+            raise ValueError(f"MP3 folder must be absolute: {folder}")
+        folder = os.path.normcase(os.path.realpath(os.path.abspath(folder)))
+        if not os.path.isdir(folder):
+            raise ValueError(f"MP3 folder does not exist or is not absolute: {folder}")
+        if folder in seen:
+            continue
+        for existing in out:
+            try:
+                common = os.path.commonpath((existing, folder))
+            except ValueError:
+                continue
+            if common in (existing, folder):
+                raise ValueError(f"MP3 folders overlap: {existing} and {folder}")
+        seen.add(folder)
+        out.append(folder)
+    return out
+
+
+def parse_download_folder(value):
+    """Validate the single download destination folder."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("DOWNLOAD_FOLDER must be a nonempty path")
+    if not os.path.isabs(value):
+        raise ValueError(f"DOWNLOAD_FOLDER must be absolute: {value}")
+    folder = os.path.normpath(os.path.abspath(value))
+    if not os.path.isdir(folder):
+        raise ValueError(f"DOWNLOAD_FOLDER does not exist: {folder}")
+    return folder
+
+
+def configured_download_folder(default):
+    raw = _env_or_file("DOWNLOAD_FOLDER")
+    if not raw:
+        return default
+    return parse_download_folder(raw)
+
+
+def configured_mp3_folders(fallback=None):
+    """Resolve process-env/.env value, using fallback only when key is absent."""
+    raw = _env_or_file("MP3_FOLDERS_JSON")
+    if raw is None:
+        return parse_mp3_folders(list(fallback or []))
+    return parse_mp3_folders(raw)
+
+
+def external_mp3_folders_override():
+    value = os.environ.get("MP3_FOLDERS_JSON")
+    return value is not None and _APP_OWNED_ENV.get("MP3_FOLDERS_JSON") != value
 
 
 def _parse(text):
@@ -37,10 +107,21 @@ def load_env():
         return _parse(f.read())
 
 
+def _env_or_file(key):
+    """Resolve a key from the live process env, falling back to the .env file.
+    None means it is set nowhere (distinct from an empty value)."""
+    raw = os.environ.get(key)
+    if raw is None:
+        raw = load_env().get(key)
+    return raw
+
+
 def apply_to_environ():
     """Load .env into the process env without clobbering real env vars."""
     for key, val in load_env().items():
-        os.environ.setdefault(key, val)
+        if key not in os.environ:
+            os.environ[key] = val
+            _APP_OWNED_ENV[key] = val
 
 
 def get(key, default=None):
@@ -54,17 +135,39 @@ def get(key, default=None):
 def save(values):
     """Merge values into .env (atomic write) and os.environ. Empty/None clears."""
     env = load_env()
+    updates = {}
     for key, val in values.items():
+        if key == "MP3_FOLDERS_JSON" and external_mp3_folders_override():
+            raise ValueError("MP3_FOLDERS_JSON is externally overridden")
         if val is None or val == "":
             env.pop(key, None)
-            os.environ.pop(key, None)
+            updates[key] = None
         else:
+            if key == "MP3_FOLDERS_JSON":
+                val = parse_mp3_folders(val)
+                val = json.dumps(val, separators=(",", ":"))
+            elif key == "DOWNLOAD_FOLDER":
+                val = parse_download_folder(val)
             env[key] = str(val)
-            os.environ[key] = str(val)
+            updates[key] = str(val)
     tmp = ENV_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("\n".join(f"{k}={v}" for k, v in env.items()) + "\n")
-    os.replace(tmp, ENV_PATH)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(f"{k}={v}" for k, v in env.items()) + "\n")
+        os.replace(tmp, ENV_PATH)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    for key, val in updates.items():
+        if val is None:
+            os.environ.pop(key, None)
+            _APP_OWNED_ENV.pop(key, None)
+        else:
+            os.environ[key] = val
+            _APP_OWNED_ENV[key] = val
     return public_view()
 
 
