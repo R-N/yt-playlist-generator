@@ -59,3 +59,38 @@ export function filterLibrary(rows, state = 'all', query = '') {
       .some((v) => v && String(v).toLowerCase().includes(q))
   })
 }
+
+// Local-file categories (server-derived) -> display meta. Moved from LocalFilesTab
+// when Local Files was merged into the Library list.
+export const FILE_CATS = {
+  verified:   { label: 'Verified',   color: 'success', icon: 'mdi-check-circle' },
+  unreviewed: { label: 'Unreviewed', color: 'info',    icon: 'mdi-help-circle-outline' },
+  rejected:   { label: 'Rejected',   color: 'error',   icon: 'mdi-close-circle-outline' },
+  unmatched:  { label: 'Unmatched',  color: 'warning', icon: 'mdi-file-question-outline' },
+  ambiguous:  { label: 'Ambiguous',  color: 'warning', icon: 'mdi-alert-circle-outline' },
+}
+export function fileCatMeta(c) { return FILE_CATS[c] || { label: c, color: 'grey', icon: 'mdi-file-music-outline' } }
+
+// Flat filter options for the merged Library list (tracks + saved links + files).
+export const LIBRARY_FILTERS = [
+  { value: 'all', label: 'All tracks' },
+  ...Object.entries(STATE_META).map(([value, m]) => ({ value, label: m.label })),
+  { value: 'saved', label: 'Saved links' },
+  { value: 'files', label: 'Untracked files' },
+]
+
+// A unified Library entry has: kind ('track'|'saved'|'file'), filterKey, search.
+// Does it match the selected dropdown value?
+export function matchesLibraryFilter(entry, filter) {
+  if (filter === 'all') return entry.kind === 'track'
+  if (filter === 'saved') return entry.kind === 'saved'
+  if (filter === 'files') return entry.kind === 'file'
+  if (filter.startsWith('file:')) return entry.kind === 'file' && entry.filterKey === filter
+  return entry.kind === 'track' && entry.filterKey === filter  // a track state
+}
+
+// Filter unified Library entries by dropdown value + free-text query. Pure.
+export function filterEntries(entries, filter = 'all', query = '') {
+  const q = query.trim().toLowerCase()
+  return entries.filter((e) => matchesLibraryFilter(e, filter) && (!q || e.search.includes(q)))
+}

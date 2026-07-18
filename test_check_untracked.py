@@ -15,6 +15,18 @@ import check_untracked as cu
 
 
 class MainUntrackedListTest(unittest.TestCase):
+    def test_empty_folder_config_writes_no_entries(self):
+        with tempfile.TemporaryDirectory() as cfg:
+            out = os.path.join(cfg, "untracked.txt")
+            orig = (cu.MP3_FOLDERS, cu.PROCESSED_FILE, cu.OUTPUT_FILE)
+            cu.MP3_FOLDERS, cu.PROCESSED_FILE, cu.OUTPUT_FILE = [], os.path.join(cfg, "missing.csv"), out
+            try:
+                cu.main()
+            finally:
+                cu.MP3_FOLDERS, cu.PROCESSED_FILE, cu.OUTPUT_FILE = orig
+            with open(out, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "")
+
     def test_lists_only_unverified_files(self):
         with tempfile.TemporaryDirectory() as music, tempfile.TemporaryDirectory() as cfg:
             for name in ("A.mp3", "B.mp3", "C.mp3"):

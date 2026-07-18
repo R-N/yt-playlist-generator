@@ -2,7 +2,7 @@ import pandas as pd
 import re
 
 dump_file_name = "dump.csv"
-id_file_name = "ids1.txt"
+id_file_name = "ids.txt"
 url_file_name = "urls.txt"
 playlist_file_name = "playlists.txt"
 username = "linearch"

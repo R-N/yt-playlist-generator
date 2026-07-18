@@ -21,15 +21,17 @@ import os
 import mutagen
 import pandas as pd
 
+from folder_config import resolve_mp3_folders
+
 MATCHES_CSV = "matches.csv"
 MATCHES_XLSX = "matches.xlsx"
 IDS_OUTPUT = "ids2.txt"
 
-MP3_FOLDERS = [
+MP3_FOLDERS = resolve_mp3_folders([
     "E:/Music/My Music",
     "E:/Music/My Music Out 2",
     "E:/Music/downloads",
-]
+])
 
 THRESHOLD_KBPS = 192      # local mp3 at or above this is "good enough" -> skip
 ONLY_CHECKED = False      # True = ids2.txt keeps only rows where check == True

@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pykakasi
 import unicodedata
 
+from folder_config import resolve_mp3_folders
+
 YDL_OPTS = {
   # "cookiesfrombrowser": ("brave", "Profile 1"),
   # "cookiefile": "cookies.txt",
@@ -21,11 +23,11 @@ YDL_OPTS = {
 }
 
 ACOUSTID_API_KEY = None
-MP3_FOLDERS = [
+MP3_FOLDERS = resolve_mp3_folders([
     "E:/Music/My Music",
     "E:/Music/My Music Out 2",
     "E:/Music/downloads",
-]
+])
 OUTPUT_FILE = "matches.csv"
 SIGN_IN_FILE = "sign_in.txt"
 BATCH_SIZE = 1

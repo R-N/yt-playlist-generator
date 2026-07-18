@@ -6,12 +6,14 @@ import pandas as pd
 import re
 import traceback
 
+from folder_config import resolve_mp3_folders
+
 ACOUSTID_API_KEY = None
-MP3_FOLDERS = [
+MP3_FOLDERS = resolve_mp3_folders([
     "E:/Music/My Music",
     "E:/Music/My Music Out 2",
     "E:/Music/downloads",
-]
+])
 PROCESSED_FILE = "matches.csv"
 OUTPUT_FILE = "untracked.txt"
 SIGN_IN_FILE = "sign_in.txt"

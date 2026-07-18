@@ -27,13 +27,15 @@ import time
 
 import pandas as pd
 
+from folder_config import resolve_mp3_folders
+
 MATCHES_CSV = "matches.csv"
 MATCHES_XLSX = "matches.xlsx"
-MP3_FOLDERS = [
+MP3_FOLDERS = resolve_mp3_folders([
     "E:/Music/My Music",
     "E:/Music/My Music Out 2",
     "E:/Music/downloads",
-]
+])
 
 API_KEY = os.environ.get("ACOUSTID_API_KEY")
 RATE_LIMIT_S = 0.34        # AcoustID asks for <= 3 requests/second

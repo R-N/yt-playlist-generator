@@ -7,7 +7,9 @@ Run from review_app/backend:
 Every test redirects db's module globals to a fresh temp dir, so the real
 matches.csv / matches.xlsx are never read or written.
 """
+import json
 import os
+import sqlite3
 import tempfile
 import unittest
 
@@ -140,6 +142,380 @@ class ImportAndDecisionTest(DbTestBase):
     def test_decision_unknown_track_raises(self):
         with self.assertRaises(KeyError):
             db.record_decision(999999, True)
+
+
+class CsvSyncTest(DbTestBase):
+    def test_sync_preserves_ids_marks_history_and_absent_extras(self):
+        write_matches(db.MATCHES_CSV, [{
+            "filename": "A.mp3", "artist": "old", "yt_id": "old-id",
+            "check": None, "mb_artist": "kept",
+        }])
+        write_matches(db.MATCHES_XLSX, [{"filename": "A.mp3", "check": None,
+                                         "mb_artist": "kept"}])
+        db.init_db()
+        tid = db.get_rows()[0][0]["id"]
+        db.record_decision(tid, True)
+
+        write_matches(db.MATCHES_CSV, [
+            {"filename": "A.mp3", "artist": "new", "yt_id": "new-id",
+             "check": None, "mb_title": "incoming"},
+            {"filename": "B.mp3", "artist": "added", "yt_id": "b"},
+        ])
+        db.sync_matches_csv()
+        rows, _ = db.get_rows()
+        by_name = {r["filename"]: r for r in rows}
+        self.assertEqual(by_name["A.mp3"]["id"], tid)
+        self.assertEqual(by_name["A.mp3"]["check"], 1)
+        self.assertEqual(by_name["A.mp3"]["artist"], "new")
+        self.assertEqual(by_name["A.mp3"]["mb_artist"], "kept")
+        self.assertEqual(by_name["A.mp3"]["mb_title"], "incoming")
+        self.assertEqual(db.counts()["total"], 2)
+        conn = db.connect()
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+        db.sync_matches_csv()
+        self.assertEqual(db.counts()["total"], 2)
+
+    def test_synced_enrichment_fields_survive_canonical_exports(self):
+        seed = [{"filename": "A.mp3", "yt_id": "a", "check": None}]
+        write_matches(db.MATCHES_CSV, seed)
+        write_matches(db.MATCHES_XLSX, seed)
+        db.init_db()
+        write_matches(db.MATCHES_CSV, [{
+            "filename": "A.mp3", "yt_id": "a", "check": None,
+            "mb_artist": "Artist", "mb_title": "Title", "ac_score": 0.91,
+            "ac_done": True, "arbitrary_extra": "kept",
+        }])
+        db.sync_matches_csv()
+        db.export_matches()
+        for path in (db.MATCHES_CSV, db.MATCHES_XLSX):
+            out = pd.read_csv(path) if path.endswith(".csv") else pd.read_excel(path)
+            row = out.iloc[0]
+            self.assertEqual(row["mb_artist"], "Artist")
+            self.assertEqual(row["mb_title"], "Title")
+            self.assertAlmostEqual(float(row["ac_score"]), 0.91)
+            self.assertEqual(str(row["ac_done"]).lower(), "true")
+            self.assertEqual(row["arbitrary_extra"], "kept")
+
+
+class WorkspaceSchemaTest(DbTestBase):
+    def test_catalog_sync_handles_more_than_one_thousand_records(self):
+        write_matches(db.MATCHES_CSV, [{"filename": "song.mp3", "yt_id": "a"}])
+        write_matches(db.MATCHES_XLSX, [{"filename": "song.mp3", "yt_id": "a"}])
+        db.init_db()
+        conn = db.connect()
+        try:
+            conn.execute(
+                "INSERT INTO track_file_links "
+                "(track_id, folder_identity, relative_path, available) VALUES (1,?,?,1)",
+                ("old", "song.mp3"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        records = [{"folder_identity": "catalog", "relative_path": f"{i}/song.mp3",
+                    "basename": f"song-{i}.mp3", "file_size": i, "modified_at": str(i)}
+                   for i in range(1201)]
+        records[0]["basename"] = "song.mp3"
+        db.sync_catalog_links(records)
+        conn = db.connect()
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT available FROM track_file_links WHERE folder_identity='old'"
+            ).fetchone()[0], 0)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM track_file_links WHERE folder_identity='catalog'"
+            ).fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def _tables(self):
+        conn = db.connect()
+        try:
+            return {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )}
+        finally:
+            conn.close()
+
+    def test_existing_curation_survives_repeated_init(self):
+        write_matches(db.MATCHES_CSV, [{"filename": "A.mp3", "yt_id": "same"}])
+        write_matches(db.MATCHES_XLSX, [{"filename": "A.mp3", "yt_id": "same"}])
+        db.init_db()
+        track_id = db.get_rows()[0][0]["id"]
+        db.record_decision(track_id, True)
+        before = self._tables()
+        db.init_db()
+        self.assertEqual(before, self._tables())
+        conn = db.connect()
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_workspace_allows_shared_youtube_id_and_exact_file_links(self):
+        youtube_id = "same1234567"
+        write_matches(db.MATCHES_CSV, [
+            {"filename": "A.mp3", "yt_id": youtube_id},
+            {"filename": "B.mp3", "yt_id": youtube_id},
+        ])
+        write_matches(db.MATCHES_XLSX, [
+            {"filename": "A.mp3", "yt_id": "same"},
+            {"filename": "B.mp3", "yt_id": "same"},
+        ])
+        db.init_db()
+        conn = db.connect()
+        try:
+            tracks = [r[0] for r in conn.execute("SELECT id FROM tracks ORDER BY id")]
+            conn.execute(
+                "INSERT INTO workspace_items "
+                "(youtube_id, youtube_url, position, provenance, track_id) VALUES (?,?,?,?,?)",
+                (youtube_id, "https://www.youtube.com/watch?v=" + youtube_id,
+                 0, "library", tracks[0]),
+            )
+            conn.execute(
+                "INSERT INTO workspace_items "
+                "(youtube_id, youtube_url, position, provenance, track_id) VALUES (?,?,?,?,?)",
+                (youtube_id, "https://www.youtube.com/watch?v=" + youtube_id,
+                 1, "library", tracks[1]),
+            )
+            conn.execute(
+                "INSERT INTO workspace_items "
+                "(youtube_id, youtube_url, position, provenance) VALUES (?,?,?,?)",
+                (youtube_id, "https://www.youtube.com/watch?v=" + youtube_id,
+                 2, "generic"),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO workspace_items "
+                    "(youtube_id, youtube_url, position, provenance) VALUES (?,?,?,?)",
+                    (youtube_id, "https://www.youtube.com/watch?v=" + youtube_id,
+                     3, "generic"),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO workspace_items "
+                    "(youtube_id, youtube_url, position, provenance) VALUES (?,?,?,?)",
+                    ("bad", "https://www.youtube.com/watch?v=bad", 4, "generic"),
+                )
+            conn.execute(
+                "INSERT INTO track_file_links "
+                "(track_id, folder_identity, relative_path) VALUES (?,?,?)",
+                (tracks[0], "library-a", "disc/song.mp3"),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO track_file_links "
+                    "(track_id, folder_identity, relative_path) VALUES (?,?,?)",
+                    (tracks[1], "library-a", "disc/song.mp3"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_saved_link_dedupe_and_run_snapshot(self):
+        youtube_id = "abc12345678"
+        write_matches(db.MATCHES_CSV, [{"filename": "A.mp3", "yt_id": "a"}])
+        write_matches(db.MATCHES_XLSX, [{"filename": "A.mp3", "yt_id": "a"}])
+        db.init_db()
+        conn = db.connect()
+        try:
+            conn.execute(
+                "INSERT INTO saved_links (youtube_id, youtube_url) VALUES (?,?)",
+                (youtube_id, "https://www.youtube.com/watch?v=" + youtube_id),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO saved_links (youtube_id, youtube_url) VALUES (?,?)",
+                    (youtube_id, "https://www.youtube.com/watch?v=" + youtube_id),
+                )
+            conn.execute(
+                "INSERT INTO workspace_runs (operation, status) VALUES (?,?)",
+                ("download", "queued"),
+            )
+            run = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            track_id = conn.execute("SELECT id FROM tracks").fetchone()[0]
+            conn.execute(
+                "INSERT INTO workspace_run_items "
+                "(run_id, position, youtube_id, youtube_url, provenance, track_id) "
+                "VALUES (?,?,?,?,?,?)",
+                (run, 0, youtube_id,
+                 "https://www.youtube.com/watch?v=" + youtube_id, "saved_links", track_id),
+            )
+            # Queued snapshots remain editable while being assembled.
+            conn.execute(
+                "UPDATE workspace_run_items SET provenance = ? WHERE run_id = ?",
+                ("queued-edit", run),
+            )
+            conn.execute("UPDATE workspace_runs SET status = 'running' WHERE id = ?", (run,))
+            other_id = "other123456"
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO workspace_run_items "
+                    "(run_id, position, youtube_id, youtube_url) VALUES (?,?,?,?)",
+                    (run, 1, other_id,
+                     "https://www.youtube.com/watch?v=" + other_id),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE workspace_run_items SET provenance = ? WHERE run_id = ?",
+                    ("late-edit", run),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("DELETE FROM workspace_run_items WHERE run_id = ?", (run,))
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
+            conn.commit()
+            db.init_db()
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM workspace_run_items WHERE run_id = ?", (run,)
+            ).fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_legacy_upgrade_preserves_tracks_decisions_and_adds_constraints(self):
+        conn = db.connect()
+        try:
+            conn.executescript("""
+                CREATE TABLE tracks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT UNIQUE NOT NULL,
+                    "check" INTEGER,
+                    extra_json TEXT
+                );
+                CREATE TABLE decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    track_id INTEGER NOT NULL REFERENCES tracks(id),
+                    filename TEXT NOT NULL,
+                    yt_id TEXT,
+                    decision INTEGER NOT NULL,
+                    ts TEXT NOT NULL
+                );
+                INSERT INTO tracks (filename, "check") VALUES ('legacy.mp3', 1);
+                INSERT INTO decisions (track_id, filename, decision, ts)
+                    VALUES (1, 'legacy.mp3', 1, '2026-01-01T00:00:00');
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_old_phase1_workspace_migrates_transactionally(self):
+        youtube_id = "migrate1234"  # 11 canonical characters
+        conn = db.connect()
+        try:
+            conn.executescript("""
+                CREATE TABLE tracks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT UNIQUE NOT NULL,
+                    "check" INTEGER,
+                    extra_json TEXT
+                );
+                CREATE TABLE decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    track_id INTEGER NOT NULL REFERENCES tracks(id),
+                    filename TEXT NOT NULL, yt_id TEXT,
+                    decision INTEGER NOT NULL, ts TEXT NOT NULL
+                );
+                CREATE TABLE workspace_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, youtube_id TEXT NOT NULL,
+                    youtube_url TEXT NOT NULL, title TEXT, channel TEXT,
+                    position INTEGER NOT NULL, provenance TEXT NOT NULL,
+                    track_id INTEGER REFERENCES tracks(id), metadata_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE saved_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, youtube_id TEXT NOT NULL,
+                    youtube_url TEXT NOT NULL, track_id INTEGER,
+                    metadata_json TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(youtube_id)
+                );
+                CREATE TABLE track_file_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, track_id INTEGER NOT NULL,
+                    folder_identity TEXT NOT NULL, relative_path TEXT NOT NULL,
+                    available INTEGER DEFAULT 1, file_size INTEGER, modified_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE workspace_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL,
+                    status TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+                    error_text TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE workspace_run_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL, youtube_id TEXT NOT NULL,
+                    youtube_url TEXT NOT NULL, title TEXT, channel TEXT,
+                    provenance TEXT, track_id INTEGER, metadata_json TEXT,
+                    snapshot_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO tracks (filename, "check") VALUES ('legacy.mp3', 1);
+                INSERT INTO decisions (track_id, filename, decision, ts)
+                    VALUES (1, 'legacy.mp3', 1, '2026-01-01T00:00:00');
+                INSERT INTO workspace_items
+                    (youtube_id, youtube_url, position, provenance, track_id)
+                    VALUES ('migrate1234', 'https://www.youtube.com/watch?v=migrate1234', 0, 'library', 1);
+                INSERT INTO workspace_runs (operation, status) VALUES ('download', 'queued');
+                INSERT INTO workspace_run_items
+                    (run_id, position, youtube_id, youtube_url, track_id)
+                    VALUES (1, 0, 'migrate1234', 'https://www.youtube.com/watch?v=migrate1234', 1);
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+        db.init_db()
+        db.init_db()
+        conn = db.connect()
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 1)
+            self.assertEqual(conn.execute(
+                "SELECT version FROM workspace_schema_meta WHERE id=1"
+            ).fetchone()[0], db._WORKSPACE_SCHEMA_VERSION)
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO workspace_run_items "
+                    "(run_id, position, youtube_id, youtube_url) VALUES (?,?,?,?)",
+                    (1, 1, youtube_id, "https://www.youtube.com/watch?v=" + youtube_id),
+                )
+            conn.execute("UPDATE workspace_runs SET status='running' WHERE id=1")
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("UPDATE workspace_runs SET status='queued' WHERE id=1")
+        finally:
+            conn.close()
+
+        db.init_db()
+        db.init_db()
+        conn = db.connect()
+        try:
+            legacy = conn.execute("SELECT filename, \"check\" FROM tracks").fetchone()
+            self.assertEqual((legacy[0], legacy[1]), ("legacy.mp3", 1))
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 1)
+            self.assertIn("workspace_items", self._tables())
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO saved_links (youtube_id, youtube_url) VALUES (?,?)",
+                    ("invalid", "https://youtu.be/invalid"),
+                )
+        finally:
+            conn.close()
+
+
+    def test_startup_interrupts_leftover_runs_with_reason(self):
+        db.init_db()
+        conn = db.connect()
+        try:
+            conn.execute("INSERT INTO workspace_runs (operation, status) VALUES ('download', 'running')")
+            conn.commit()
+        finally:
+            conn.close()
+        db.init_db()
+        run = db.list_workspace_runs()[0]
+        self.assertEqual(run["status"], "interrupted")
+        self.assertIn("restarted", run["error_text"])
 
 
 class ExportTest(DbTestBase):
@@ -354,6 +730,156 @@ class ExpandExtraNanTest(unittest.TestCase):
         out = db._expand_extra({"score": 42.0, "yt_views": 1000})
         self.assertEqual(out["score"], 42.0)
         self.assertEqual(out["yt_views"], 1000)
+
+
+class WorkspaceMetadataTest(DbTestBase):
+    def _seed_item(self):
+        write_matches(db.MATCHES_CSV, [{"filename": "song.mp3", "yt_id": "a"}])
+        write_matches(db.MATCHES_XLSX, [{"filename": "song.mp3", "yt_id": "a"}])
+        db.init_db()
+        return db.import_workspace_items([{
+            "youtube_id": "dQw4w9WgXcQ",
+            "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "provenance": "paste"}])[0]
+
+    def test_fills_columns_and_merges_blob(self):
+        item = self._seed_item()
+        db.set_workspace_metadata(item["id"], {"health": "ok", "title": "Never Gonna",
+                                               "channel": "Rick", "view_count": 10})
+        row = next(w for w in db.list_workspace() if w["id"] == item["id"])
+        self.assertEqual(row["title"], "Never Gonna")
+        self.assertEqual(row["channel"], "Rick")
+        self.assertEqual(json.loads(row["metadata_json"])["view_count"], 10)
+        # a later dead re-check updates health but COALESCE keeps the known title
+        db.set_workspace_metadata(item["id"], {"health": "dead"})
+        row = next(w for w in db.list_workspace() if w["id"] == item["id"])
+        self.assertEqual(row["title"], "Never Gonna")
+        self.assertEqual(json.loads(row["metadata_json"])["health"], "dead")
+
+    def test_unknown_item_raises(self):
+        self._seed_item()
+        with self.assertRaises(KeyError):
+            db.set_workspace_metadata(999999, {"health": "ok"})
+
+
+class MatchLocalFileByNameTest(DbTestBase):
+    def setUp(self):
+        super().setUp()
+        write_matches(db.MATCHES_CSV, [{"filename": "song.mp3", "yt_id": "a", "check": None}])
+        write_matches(db.MATCHES_XLSX, [{"filename": "song.mp3", "yt_id": "a", "check": None}])
+        db.init_db()
+
+    def _add_track(self, filename):
+        conn = db.connect()
+        try:
+            with conn:
+                conn.execute('INSERT INTO tracks (filename, "check") VALUES (?, NULL)', (filename,))
+        finally:
+            conn.close()
+
+    def test_links_single_match(self):
+        result = db.match_local_file_by_name("folder1", "sub/song.mp3", "song.mp3", 100, "1")
+        self.assertTrue(result["matched"])
+        conn = db.connect()
+        try:
+            row = conn.execute(
+                "SELECT track_id, available FROM track_file_links WHERE folder_identity='folder1'").fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row["available"], 1)
+        self.assertEqual(row["track_id"], result["track_id"])
+
+    def test_no_database_entry(self):
+        result = db.match_local_file_by_name("folder1", "sub/other.mp3", "other.mp3")
+        self.assertFalse(result["matched"])
+        self.assertIn("no database entry", result["reason"])
+
+    def test_ambiguous_same_basename(self):
+        self._add_track("one/dup.mp3")
+        self._add_track("two/dup.mp3")
+        result = db.match_local_file_by_name("folder1", "sub/dup.mp3", "dup.mp3")
+        self.assertFalse(result["matched"])
+        self.assertIn("multiple", result["reason"])
+
+    def test_already_linked_rejected(self):
+        db.match_local_file_by_name("folder1", "sub/song.mp3", "song.mp3", 100, "1")
+        with self.assertRaises(ValueError):
+            db.match_local_file_by_name("folder1", "sub/song.mp3", "song.mp3")
+
+    def test_matched_track_no_longer_candidate(self):
+        # linking the only track consumes it; a second file finds nothing
+        db.match_local_file_by_name("folder1", "sub/song.mp3", "song.mp3", 100, "1")
+        result = db.match_local_file_by_name("folder2", "other/song.mp3", "song.mp3")
+        self.assertFalse(result["matched"])
+
+
+class AddLocalFileToLibraryTest(DbTestBase):
+    def setUp(self):
+        super().setUp()
+        write_matches(db.MATCHES_CSV, [{"filename": "exist.mp3", "yt_id": "a", "check": None}])
+        write_matches(db.MATCHES_XLSX, [{"filename": "exist.mp3", "yt_id": "a", "check": None}])
+        db.init_db()
+
+    def test_creates_new_track_for_unknown_file(self):
+        r = db.add_local_file_to_library("f", "sub/new.mp3", "new.mp3", 10, "1")
+        self.assertTrue(r["created"])
+        self.assertTrue(r["track_id"])
+
+    def test_links_to_existing_track_by_filename(self):
+        r = db.add_local_file_to_library("f", "sub/exist.mp3", "exist.mp3", 10, "1")
+        self.assertFalse(r["created"])
+
+    def test_already_linked_raises(self):
+        db.add_local_file_to_library("f", "sub/new.mp3", "new.mp3")
+        with self.assertRaises(ValueError):
+            db.add_local_file_to_library("f", "sub/new.mp3", "new.mp3")
+
+
+class WorkspaceMigrationTest(DbTestBase):
+    def test_migration_reruns_without_trigger_errors(self):
+        write_matches(db.MATCHES_CSV, [{"filename": "a.mp3", "yt_id": "vid12345678", "check": 1}])
+        write_matches(db.MATCHES_XLSX, [{"filename": "a.mp3", "yt_id": "vid12345678", "check": 1}])
+        db.init_db()
+        tid = db.get_rows(status="all")[0][0]["id"]
+        db.promote_library_track(tid)
+        conn = db.connect()
+        try:
+            with conn:
+                conn.execute("UPDATE workspace_schema_meta SET version=0")   # force migration path
+        finally:
+            conn.close()
+        db.init_db()   # must not raise: triggers are dropped before the drop/rename
+        self.assertEqual(len(db.list_workspace()), 1)
+        conn = db.connect()
+        try:
+            self.assertEqual(conn.execute("SELECT version FROM workspace_schema_meta").fetchone()[0],
+                             db._WORKSPACE_SCHEMA_VERSION)
+        finally:
+            conn.close()
+
+
+class RemoveTracksTest(DbTestBase):
+    def setUp(self):
+        super().setUp()
+        write_matches(db.MATCHES_CSV, [{"filename": "gone.mp3", "yt_id": "vid12345678", "check": 1}])
+        write_matches(db.MATCHES_XLSX, [{"filename": "gone.mp3", "yt_id": "vid12345678", "check": 1}])
+        db.init_db()
+
+    def test_removes_track_and_dependents_returns_ytid(self):
+        rows, _ = db.get_rows(status="all")
+        tid = rows[0]["id"]
+        db.add_local_file_to_library("f", "sub/gone.mp3", "gone.mp3", 5, "1")
+        removed = db.remove_tracks([tid])
+        self.assertEqual(removed, ["vid12345678"])
+        conn = db.connect()
+        try:
+            self.assertIsNone(conn.execute("SELECT id FROM tracks WHERE id=?", (tid,)).fetchone())
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM track_file_links WHERE track_id=?", (tid,)).fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_unknown_id_noop(self):
+        self.assertEqual(db.remove_tracks([999999]), [])
 
 
 if __name__ == "__main__":

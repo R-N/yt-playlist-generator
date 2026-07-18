@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed, confidenceColor,
-  stateMeta, filterLibrary } from './review'
+  stateMeta, filterLibrary, filterEntries } from './review'
 
 describe('keyToAction', () => {
   it('maps approve keys', () => {
@@ -65,6 +65,31 @@ describe('stateMeta', () => {
     expect(stateMeta('confirmed').color).toBe('success')
     expect(stateMeta('link_only').label).toBe('Link only')
     expect(stateMeta('???').color).toBe('grey')
+  })
+})
+
+describe('filterEntries (merged Library list)', () => {
+  const entries = [
+    { kind: 'track', filterKey: 'confirmed', search: 'yoasobi idol' },
+    { kind: 'track', filterKey: 'unreviewed', search: 'ado show' },
+    { kind: 'saved', filterKey: 'saved', search: 'youtu.be/abc song' },
+    { kind: 'file', filterKey: 'file:verified', search: 'track.mp3 music/track.mp3' },
+    { kind: 'file', filterKey: 'file:unmatched', search: 'orphan.flac music/orphan.flac' },
+  ]
+  it("'all' shows only tracks", () => {
+    expect(filterEntries(entries, 'all', '').every((e) => e.kind === 'track')).toBe(true)
+    expect(filterEntries(entries, 'all', '')).toHaveLength(2)
+  })
+  it('a track state filters tracks by state', () => {
+    expect(filterEntries(entries, 'confirmed', '')).toHaveLength(1)
+  })
+  it("'saved' and 'files' select their kind", () => {
+    expect(filterEntries(entries, 'saved', '').map((e) => e.kind)).toEqual(['saved'])
+    expect(filterEntries(entries, 'files', '')).toHaveLength(2)
+  })
+  it('file:<category> narrows to one category, query still applies', () => {
+    expect(filterEntries(entries, 'file:verified', '')).toHaveLength(1)
+    expect(filterEntries(entries, 'files', 'orphan')).toHaveLength(1)
   })
 })
 

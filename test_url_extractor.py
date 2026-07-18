@@ -39,7 +39,7 @@ class MainTest(unittest.TestCase):
             orig = (ux.dump_file_name, ux.id_file_name, ux.url_file_name,
                     ux.playlist_file_name, ux.username)
             ux.dump_file_name = dump
-            ux.id_file_name = os.path.join(d, "ids1.txt")
+            ux.id_file_name = os.path.join(d, "ids.txt")
             ux.url_file_name = os.path.join(d, "urls.txt")
             ux.playlist_file_name = os.path.join(d, "playlists.txt")
             ux.username = "linearch"
@@ -49,7 +49,7 @@ class MainTest(unittest.TestCase):
                 (ux.dump_file_name, ux.id_file_name, ux.url_file_name,
                  ux.playlist_file_name, ux.username) = orig
 
-            with open(os.path.join(d, "ids1.txt")) as f:
+            with open(os.path.join(d, "ids.txt")) as f:
                 ids = [l.strip() for l in f if l.strip()]
             self.assertEqual(ids, ["aaaaaaaaaaa", "bbbbbbbbbbb"])   # deduped, author-filtered
             with open(os.path.join(d, "playlists.txt")) as f:

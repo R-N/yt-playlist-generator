@@ -25,11 +25,13 @@ import urllib.request
 
 import mutagen
 
-MP3_FOLDERS = [
+from folder_config import resolve_mp3_folders
+
+MP3_FOLDERS = resolve_mp3_folders([
     "E:/Music/My Music",
     "E:/Music/My Music Out 2",
     "E:/Music/downloads",
-]
+])
 RATE_LIMIT_S = 0.5
 UA = "yt-playlist-generator/1.0 (personal music library)"
 

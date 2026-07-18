@@ -6,8 +6,22 @@ import os
 import glob
 
 
-id_file_name = "ids.txt"
-download_folder = "downloads"
+def resolve_input_file(default="ids.txt", env_name="YT_INPUT_FILE"):
+    configured = os.environ.get(env_name)
+    if configured is None:
+        return default
+    if not os.path.isabs(configured):
+        raise ValueError(f"{env_name} must be an absolute existing regular file: {configured!r}")
+    path = os.path.normcase(os.path.realpath(configured))
+    if not os.path.isfile(path):
+        raise ValueError(f"{env_name} must be an absolute existing regular file: {configured!r}")
+    return path
+
+
+id_file_name = resolve_input_file()
+# Destination folder; the review-app Settings page sets DOWNLOAD_FOLDER in .env
+# and passes it through the environment. Falls back to the repo-local downloads/.
+download_folder = os.environ.get("DOWNLOAD_FOLDER") or "downloads"
 downloaded_log_file = "downloaded_ids.txt"
 error_log_file = "error_ids.txt"
 SIGN_IN_FILE = "sign_in.txt"
@@ -21,7 +35,7 @@ YDL_OPTS = {
   'extract_audio': True,
   'audio_format': 'opus',
   'audio_quality': '160K',
-  'outtmpl': 'downloads/%(uploader)s - %(title)s [%(id)s].%(ext)s',
+  'outtmpl': os.path.join(download_folder, '%(uploader)s - %(title)s [%(id)s].%(ext)s'),
   'quiet': False,
 #   'verbose': True,
   'noplaylist': True,
@@ -82,7 +96,7 @@ def download(ydl_opts, url, cookies=False):
             with open(SIGN_IN_FILE, "a", encoding="utf-8") as f:
                 f.write(f"{url}\n")
             if not cookies:
-                return search(ydl_opts, url, cookies=True)
+                return download(ydl_opts, url, cookies=True)
         elif "sign in if you've been granted access" in error_message:
             print(f"Private video: {url}")
         elif "video unavailable" in error_message:
@@ -98,7 +112,7 @@ def download(ydl_opts, url, cookies=False):
 
 def main():
   # Load list of all video IDs
-  all_ids = pd.read_csv('ids.txt', header=None)[0].dropna().unique().tolist()
+  all_ids = pd.read_csv(id_file_name, header=None)[0].dropna().unique().tolist()
 
   # Log file to track completed downloads
   log_file = Path(downloaded_log_file)

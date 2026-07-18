@@ -26,6 +26,12 @@ const vuetify = createVuetify({
   defaults: {
     VCard: { rounded: 'lg' },
     VBtn: { rounded: 'lg' },
+    // Denser defaults across the app — the comfortable defaults read as mobile-sized.
+    VList: { density: 'compact' },
+    VTextField: { density: 'compact' },
+    VSelect: { density: 'compact' },
+    VDataTable: { density: 'compact' },
+    VToolbar: { density: 'compact' },
   },
 })
 

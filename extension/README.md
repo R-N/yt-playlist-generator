@@ -1,44 +1,36 @@
-# Music Toolkit — YT Liker (Chrome extension)
+# Music Toolkit — YT Liker
 
-Likes a list of YouTube videos on **your own account**, using your already
-logged-in browser session — no OAuth, no API key. Built to consume the video
-ids the toolkit harvests (e.g. from the Discord tab → `ids.txt`) and like them
-in bulk, throttled.
+Chrome extension that likes YouTube videos on your own logged-in account. It
+is compatibility tooling, not primary app navigation. The app queue endpoint
+(`GET /api/likes/queue`) serves legacy `ids.txt`; paste IDs also works.
 
 ## How it works
 
-A content script on `youtube.com` calls YouTube's internal
-`youtubei/v1/like/like` endpoint. Because it runs in your logged-in tab the
-request is same-origin and carries your auth cookies automatically; it computes
-the `SAPISIDHASH` authorization header from your `SAPISID` cookie the same way
-YouTube's own page JS does. This is *you*, in *your* browser — not a headless
-bot on a server — which is the lowest-risk way to do this. It still automates
-writes, so it throttles (default 4s + jitter between likes) and has a Stop
-button.
+On `youtube.com`, content script calls YouTube internal
+`youtubei/v1/like/like`. Browser cookies provide session auth; the extension
+computes `SAPISIDHASH`. Likes are throttled (default 4s plus jitter) and Stop
+halts after current item.
 
-## Install (unpacked)
+## Install
 
-1. `chrome://extensions` → enable **Developer mode** (top right).
-2. **Load unpacked** → select this `extension/` folder.
-3. Pin the extension if you like.
+1. Open `chrome://extensions` and enable Developer mode.
+2. Choose **Load unpacked** and select this `extension/` folder.
+3. Pin extension if useful.
 
 ## Use
 
-1. Run the toolkit app (`review_app`, on `:8000`) and harvest ids into `ids.txt`
-   (Discord tab), or have a list of 11-char video ids ready.
-2. Open a **logged-in** `youtube.com` tab.
-3. Click the extension → **Load from app** (pulls `ids.txt` via
-   `GET :8000/api/likes/queue`) or paste ids into the box.
-4. Set the per-like delay, click **Like all**, confirm. Progress streams in the
-   popup; **Stop** halts after the current item.
+1. Run app on `:8000`, or prepare a list of 11-character YouTube IDs.
+2. Open logged-in `youtube.com` tab.
+3. Choose **Load from app** for compatibility queue, or paste IDs.
+4. Set delay, click **Like all**, confirm. Stop when needed.
 
-## ⚠️ Cautions
+Workspace imports and persists current YouTube work; extension queue remains
+legacy compatibility surface only.
 
-- **Bulk liking can trip YouTube's spam protection.** Keep the delay sane (don't
-  go below a few seconds). On the first run, test with 5–10 ids and confirm they
-  appear in your Liked playlist before scaling up.
-- This automates writes to your account — your account, your risk.
-- It depends on YouTube internals (`INNERTUBE_API_KEY`, the like endpoint, the
-  `SAPISID` cookie). If YouTube changes those, likes start returning HTTP errors
-  and the extension needs updating. Open a normal watch/home page (not an embed)
-  so the api key is present to scrape.
+## Cautions
+
+- Bulk liking can trigger spam protection. Test 5–10 IDs first and keep delay
+  several seconds.
+- This automates account writes; use at own risk.
+- YouTube internal API key, endpoint, and `SAPISID` cookie can change. Use a
+  normal watch/home page so API key is available.

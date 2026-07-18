@@ -1,138 +1,93 @@
-# Match Review app
+# Workspace-first app
 
-Local web UI to curate `matches.csv`: play your local mp3 next to the YouTube
-candidate, approve/reject with one key. Replaces hand-editing the spreadsheet.
+FastAPI + SQLite backend and Vue 3/Vuetify frontend for managing YouTube
+items, downloads, local files, and curation.
 
-## Stack
-- **Backend:** FastAPI + SQLite (`backend/`)
-- **Frontend:** Vue 3 + Vuetify 3 via Vite (`frontend/`)
-- Local audio served read-only with HTTP Range (scrubbing works); YouTube
-  candidate shown via the official IFrame embed **and** an audio-only preview
-  (`GET /api/yt_audio/{yt_id}` resolves the candidate's audio with `yt-dlp -g`
-  and redirects the `<audio>` element to it) so you can verify by ear even when
-  the embed is blocked (age-restricted / embedding disabled).
+## Navigation
 
-## Tabs
+Primary navigation is **Import, Workspace, Library, Review, Settings**.
+Pipeline, Playlist, and Discord are not primary screens. The old Local Files
+and Untracked screens are merged into Library.
 
-The UI is tabbed; the original review screen is one of them.
+- **Import** owns pasted YouTube, Discord, and an **Untracked files** tab
+  (configured-folder files with no Library entry): preview, Add to Library,
+  Send to Workspace.
+- **Workspace** persists items, exact selection/order, 50-item batches,
+  exports, and isolated download runs. A Workspace item is its own entity
+  (schema v5): it references a YouTube id, a library track (nullable FK), OR a
+  local file directly (folder identity + relative path), so link-less files can
+  stage without a Library row.
+- **Library** merges tracks, Saved Links, and untracked local files in one
+  filterable list. Exact handoff to Workspace, Verify links (YouTube health),
+  Remove (drops the Library entry + downloaded file), and Review handoff.
+- **Review** curates exact local-file matches; curation remains SQLite-backed.
+- **Settings** validates mp3 folders, sets the separate download folder,
+  rescans the catalog, stores credentials, and runs failed-download cleanup.
 
-- **Review** — curate matches by ear (the rest of this README).
-- **Discord** — fetch a Discord channel's messages via the bot API, extract every
-  YouTube video id, and write `ids.txt`/`urls.txt`/`playlists.txt` at the repo
-  root (feeds the downloader / playlist flow). Backed by `discord_service.py`,
-  which reuses the repo-root `discord_fetch.py` + `discord_extractor.py`.
-- **Playlist** — paste YouTube URLs or 11-char video ids and get `watch_videos`
-  playlist URLs back (ids chunked in groups of 50). The original
-  `playlist_generator.py` in the browser (`POST /api/playlists`).
-- **Pipeline** — run any root script as a background subprocess job and watch its
-  log live; Stop cancels it. The scripts are unchanged — the app orchestrates
-  them (this keeps the repo's "scripts share files as their interface" design).
-  Destructive scripts (`cleanup_downloads`, `cleanup_tracked` — they delete
-  files) are flagged red and require typing `DELETE` before they run.
-- **Settings** — store secrets in a gitignored `.env` at the repo root
-  (`DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `ACOUSTID_API_KEY`). On startup the
-  backend loads `.env` into the environment (without clobbering real env vars),
-  so the subprocess scripts inherit them. Secrets are masked in the API.
+**Labels** are shared clickable icon badges (`labels.js` / `LabelRow.vue`) used
+by Workspace and Library: YouTube, Local file, Downloaded, Untracked,
+Confirmed, Rejected. A **download** (file in the download folder) is distinct
+from a **local file** (mp3-folder catalog entry).
 
-A companion Chrome extension (`../extension/`) consumes `ids.txt` via
-`GET /api/likes/queue` to like the harvested videos on your account — see
-`extension/README.md`.
+## Safety
 
-## Data safety (this is the point)
-- Your verified `check` marks are the irreplaceable asset. The app guards them:
-  - SQLite store with ACID transactions — no half-written file ever.
-  - `decisions` table is **append-only**: every approve/reject is logged with a
-    timestamp and never overwritten. `tracks.check` is the current value;
-    `decisions` is the replayable history if anything looks wrong.
-  - `Export CSV` snapshots the old `matches.csv`/`.xlsx` into `backups/` first,
-    then writes via temp-file + atomic rename.
-  - The app never writes or deletes any audio file.
-- On first launch it reconciles `matches.csv` + `matches.xlsx` into the DB once
-  (only if empty) — union of rows, xlsx-priority marks, never dropping a
-  decision — so your existing marks are preserved, not reset.
+- Configured folders require validation. Operations enforce containment.
+- File identity is configured folder plus relative path, not basename.
+- Selected mp3-folder deletion is approved-only. Preview shows exact targets;
+  confirmation requires short-lived token/manifest and typed `DELETE`, then
+  revalidates containment and identity and records an audit.
+- Removing a Library entry drops the row + its downloaded file only; mp3-folder
+  files are never touched by it. Download-file deletion is the app's own output
+  (simple confirm). Reveal/`explorer /select` and the folder picker are
+  localhost-only.
+- Failed-download cleanup uses immutable preview manifests and safeguarded
+  confirmation; it does not rescan at confirmation time.
+- SQLite decisions are append-only (unreview clears the current mark, keeps
+  history). Export snapshots existing CSV/XLSX before atomic replacement;
+  `yt_health` is a runtime cache and is not exported.
 
-Native wrappers (`.bat`, `.ps1`, `.sh`) wrap the Python scripts and forward all
-args. Use whichever fits your shell; they do the same thing.
+## Setup
 
-## Setup (one-time)
-Run from the env that has pandas (e.g. mambaforge), so backend deps land there:
-```
+```bash
 cd review_app
-install.bat                 cmd
-.\install.ps1               PowerShell
-./install.sh                bash / git-bash
-python install.py           any
+python install.py
 ```
-`--backend` / `--frontend` install just one side.
+
+Wrappers remain available:
+
+```bash
+install.bat
+.\install.ps1
+./install.sh
+```
 
 ## Run
-```
+
+```bash
 cd review_app
-run.bat                     cmd          (built mode, default)
-.\run.ps1 --dev             PowerShell   (dev mode)
-./run.sh                    bash
-python run.py               any
+python run.py                 # build and serve on :8000
+python run.py --dev           # uvicorn reload + Vite on :5173
 ```
-Built mode (default): build frontend, serve SPA + API on :8000. `--dev`: uvicorn
-`--reload` + Vite on :5173. `run.py` auto-runs `npm install` if you skipped setup.
-- Built mode (default): open <http://127.0.0.1:8000>. Rebuilds each run; add
-  `--no-build` to serve the existing `frontend/dist/` as-is.
-- Dev mode: open <http://localhost:5173> (Vite hot-reload; proxies `/api`).
-- Options: `--port N`, `--host H`, `--no-install`.
 
-Review, then click **Export CSV** to write your marks back to `matches.csv` /
-`matches.xlsx` (marks also auto-save to the CSV every 25 decisions).
+Also available: `run.bat`, `run.ps1`, `run.sh`, `--port N`, `--host H`,
+`--no-install`, and built-mode `--no-build`.
 
-## Keys
-`A` / `→` approve · `R` / `←` reject · `↑` back
+## Optional MusicBrainz cross-check
 
-## AcoustID / MusicBrainz cross-check (optional)
-`acoustid_enrich.py` (repo root) fingerprints each local mp3 and tags it with
-the canonical MusicBrainz artist/title — language-independent, so it catches
-wrong Japanese matches. The review UI shows it as a MusicBrainz panel
-(green/amber/grey = strong/weak/none) and flags `suggests APPROVE` when AcoustID
-is confident and the YouTube candidate agrees.
-
-Setup (in your mambaforge env):
-1. Free API key — register an app at <https://acoustid.org/new-application>.
-2. `conda install -c conda-forge chromaprint` (provides `fpcalc`; verify `fpcalc -version`).
-3. `pip install pyacoustid musicbrainzngs`
-4. Expose the key: `export ACOUSTID_API_KEY=YOURKEY` (bash) /
-   `$env:ACOUSTID_API_KEY = "YOURKEY"` (PowerShell).
-5. `python acoustid_enrich.py` (resumable), then **re-seed** the review DB
-   (delete `backend/review.db`) so the new `mb_*` columns import.
+From repository root, `acoustid_enrich.py` can fingerprint local MP3s using
+`fpcalc`, `pyacoustid`, and `ACOUSTID_API_KEY`. It is resumable; export first,
+then re-seed DB only when importing changed source data.
 
 ## Tests
-`unittest` (stdlib). Every test redirects DB/CSV/XLSX paths and `MP3_FOLDERS`
-to a temp dir, so real `matches.*` and music files are never touched.
+
 ```bash
 cd review_app/backend
-python -m unittest discover -p "test_*.py" -v     # all
-python -m unittest test_db -v                     # data layer only
-python -m unittest test_api -v                    # API only (needs httpx)
-```
-- `test_db` — `check` coercion, reconcile (union, xlsx-priority, blank-rescue,
-  conflict count, no-marks-lost, csv/xlsx-only, dup-filename), append-only
-  atomic decisions, snapshot-backed atomic export, non-core column
-  (`extra_json`) round-trip, and the NaN scrub in `_expand_extra` (blank numeric
-  cells arrive as NaN, which the JSON encoder rejects).
-- `test_api` — endpoints, the auto-export-every-N trigger, the audio endpoint's
-  read-only / `Range` (206) / 404 behavior, the `/api/yt_audio` candidate-preview
-  redirect (id validation, resolver stubbed), and the NaN-serialization guard on
-  `/api/rows` (a NaN in the real DB must serialize, not 500).
-- `test_integrations` — settings `.env` round-trip + secret masking, the Discord
-  service (extraction order, embeds, author filter, missing-token error; network
-  stubbed), and the job catalog's destructive flags.
-
-Frontend logic (Vitest) — pure helpers in `src/review.js` (key mapping, queue
-advance, formatting, embed URL):
-```bash
-cd review_app/frontend
+python -m unittest discover -p "test_*.py" -v
+cd ../frontend
 npm run test
+npm run build
 ```
 
-## Re-seeding the DB
-The DB reconciles `matches.csv` + `matches.xlsx` only when empty. To re-import
-after changing them (e.g. after `acoustid_enrich.py`), delete `backend/review.db`
-(and `-wal`/`-shm`) and restart — **export first** so you don't lose marks made
-only in the DB.
+Backend tests isolate DB/CSV/XLSX and folders in temporary directories. Root
+scripts retain their standalone tests and commands. The extension queue
+endpoint (`GET /api/likes/queue`) is compatibility integration only.

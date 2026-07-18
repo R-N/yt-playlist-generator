@@ -6,13 +6,15 @@ import pandas as pd
 import re
 import traceback
 
+from folder_config import resolve_mp3_folders
+
 ACOUSTID_API_KEY = None
-MP3_FOLDERS = [
+MP3_FOLDERS = resolve_mp3_folders([
     "E:/Music/My Music",
     "E:/Music/My Music Out 2",
     "E:/Music/downloads",
-]
-PROCESSED_FILE = "matches - Copy (3).csv"
+])
+PROCESSED_FILE = "matches.csv"
 
 def is_valid_youtube_id(s):
     return bool(re.fullmatch(r"[a-zA-Z0-9_-]{11}", s or ""))
@@ -56,7 +58,7 @@ def load_processed_files():
         df = df[df['yt_id'].notna() & (df['yt_id'] != '')]
         df = df.sort_values("check", ascending=True).drop_duplicates(subset="filename", keep="last")
         df = df.set_index("filename")
-        passes = df["check"].notna() & ((df["check"] == 1) | (df["check"] == True) | (df["check"] == "True") | (df["check"] == "TRUE"))
+        passes = df["check"] == 1
         passes = passes.to_dict()
         return passes
     return {}
@@ -73,11 +75,21 @@ def save_to_csv(results):
 # Process all MP3s
 def main():
     passes = load_processed_files()
+    candidate_counts = {}
+    for folder in MP3_FOLDERS:
+        for file in os.listdir(folder):
+            if file.lower().endswith(".mp3"):
+                key = os.path.normcase(file)
+                candidate_counts[key] = candidate_counts.get(key, 0) + 1
+
     for MP3_FOLDER in MP3_FOLDERS:
         print("Processing folder", MP3_FOLDER)
         for i, file in enumerate(os.listdir(MP3_FOLDER)):
             if file.lower().endswith(".mp3"):
                 if file in passes and passes[file]:
+                    if candidate_counts[os.path.normcase(file)] > 1:
+                        print(f"Skipping ambiguous approved filename: {file}")
+                        continue
                     full_path = os.path.join(MP3_FOLDER, file)
                     print("Deleting:", full_path)
                     os.remove(full_path)

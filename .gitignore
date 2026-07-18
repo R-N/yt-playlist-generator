@@ -31,8 +31,10 @@ review_app/backend/review.db-shm
 review_app/frontend/node_modules/
 review_app/frontend/dist/
 review_app/backups/
+review_app/backend/workspace_runs/
 
 # --- Misc ---
+.slim/deepwork/
 .ipynb_checkpoints/
 __pycache__/
 *.pyc
