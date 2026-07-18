@@ -65,8 +65,14 @@ Files and Untracked screens are folded into Library.
 - **Settings** owns validated mp3-folder config/rescan, the separate **download
   folder**, credentials, and failed-download cleanup.
 - **Labels** (`labels.js` + `LabelRow.vue`) are the shared clickable icon
-  badges for Workspace and Library. A **download** (download-folder file, keyed
-  by `[<id>]` in name) is distinct from a **local file** (mp3-folder catalog).
+  badges for Workspace, Library, and Import. A **download** (download-folder
+  file, keyed by `[<id>]` in name) is distinct from a **local file** (mp3-folder
+  catalog).
+- Workspace, Library, and Import-untracked share one list view
+  (`CurationList.vue`); reactive plumbing and action dispatch live once in
+  `curation.js` (`useRowActions`/`usePreview`/`usePagination`/`useSelection`/
+  `useLabelFilter`). Each screen supplies only a row-normalizer and injects
+  per-screen bits (delete, review), so an action fix lands everywhere at once.
 - Folder operations validate configured directories and containment. File
   identity uses configured folder plus relative path, never basename alone.
 - Selected mp3-folder deletion previews exact targets, uses short-lived
@@ -75,6 +81,9 @@ Files and Untracked screens are folded into Library.
   files. Download-file deletion is the app's own output (simple confirm, no
   token). `explorer /select` reveal and the tkinter folder picker are
   localhost-only (server host = user machine).
+- Serve/open the app by hostname (`localhost`), never a bare IP: YouTube's
+  embedded player rejects an IP-origin referer ("Video unavailable"). `run.py`
+  defaults `--host` to `localhost`.
 - Failed-download cleanup uses an immutable preview manifest and safeguards;
   it does not rescan a changing directory at confirmation time.
 - `GET /api/likes/queue` and the Chrome extension are compatibility only; they

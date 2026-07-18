@@ -47,6 +47,14 @@ class RunPlanTest(unittest.TestCase):
         self.assertIn("uvicorn", be_cmd)
         self.assertEqual(fe_cmd[-2:], ["run", "dev"])
 
+    def test_default_host_is_a_hostname_not_an_ip(self):
+        # Regression guard: YouTube's iframe player shows "Video unavailable"
+        # when the page origin is a bare IP (127.0.0.1). Must default to a
+        # hostname so embeds work out of the box.
+        host = run.build_parser().parse_args([]).host
+        self.assertEqual(host, "localhost")
+        self.assertFalse(host.replace(".", "").isdigit(), "host must not be an IP literal")
+
 
 class InstallSelectionTest(unittest.TestCase):
     def _args(self, backend=False, frontend=False):

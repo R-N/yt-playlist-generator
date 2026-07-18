@@ -15,9 +15,13 @@ to manage imports, saved work, local files, downloads, and curation.
 ```bash
 cd review_app
 python install.py
-python run.py                 # built app at http://127.0.0.1:8000
+python run.py                 # built app at http://localhost:8000
 python run.py --dev           # Vite hot reload at http://localhost:5173
 ```
+
+Open the app by **hostname** (`localhost`), not a bare IP (`127.0.0.1`):
+YouTube's embedded player rejects an IP-origin referer and shows "Video
+unavailable". `run.py` defaults `--host` to `localhost` for this reason.
 
 Primary navigation: **Import, Workspace, Library, Review, Settings**. The former
 Local Files and Untracked screens are folded into Library.

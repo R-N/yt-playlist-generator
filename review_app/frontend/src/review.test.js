@@ -45,7 +45,7 @@ describe('prevIndex', () => {
 
 describe('youtubeEmbed', () => {
   it('builds embed url or null', () => {
-    expect(youtubeEmbed('abc123')).toBe('https://www.youtube.com/embed/abc123')
+    expect(youtubeEmbed('abc123')).toBe('https://www.youtube-nocookie.com/embed/abc123?rel=0')
     expect(youtubeEmbed('')).toBeNull()
     expect(youtubeEmbed(null)).toBeNull()
   })

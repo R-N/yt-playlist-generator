@@ -25,9 +25,16 @@ and Untracked screens are merged into Library.
   rescans the catalog, stores credentials, and runs failed-download cleanup.
 
 **Labels** are shared clickable icon badges (`labels.js` / `LabelRow.vue`) used
-by Workspace and Library: YouTube, Local file, Downloaded, Untracked,
+by Workspace, Library, and Import: YouTube, Local file, Downloaded, Untracked,
 Confirmed, Rejected. A **download** (file in the download folder) is distinct
 from a **local file** (mp3-folder catalog entry).
+
+Workspace, Library, and Import-untracked render the same list via
+`CurationList.vue`. The reactive plumbing and per-action logic live once in
+`curation.js` (`useRowActions` / `usePreview` / `usePagination` /
+`useSelection` / `useLabelFilter`); each screen supplies only a row-normalizer
+and injects genuinely per-screen actions (delete, review), so a fix to any
+shared action applies everywhere.
 
 ## Safety
 
@@ -71,6 +78,10 @@ python run.py --dev           # uvicorn reload + Vite on :5173
 
 Also available: `run.bat`, `run.ps1`, `run.sh`, `--port N`, `--host H`,
 `--no-install`, and built-mode `--no-build`.
+
+`--host` defaults to `localhost` (a hostname), not `127.0.0.1`. YouTube's
+embedded player rejects a bare-IP origin referer and renders "Video
+unavailable", so open the app at `http://localhost:PORT`.
 
 ## Optional MusicBrainz cross-check
 

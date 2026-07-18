@@ -10,7 +10,7 @@ Modes:
 
 Options:
   --port N      backend port (default 8000)
-  --host H      backend host (default 127.0.0.1)
+  --host H      backend host (default localhost)
   --no-build    built mode only: skip the rebuild, serve existing dist/
   --no-install  skip the automatic `npm install`
 
@@ -119,17 +119,23 @@ def serve_dev(args):
             kill_tree(p)
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description="Run the review app.")
     ap.add_argument("--dev", action="store_true",
                     help="dev frontend (Vite) instead of built")
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--host", default="127.0.0.1")
+    # localhost, not 127.0.0.1: YouTube's iframe player rejects embeds whose
+    # referer origin is a bare IP ("Video unavailable"); a hostname passes.
+    ap.add_argument("--host", default="localhost")
     ap.add_argument("--no-build", action="store_true",
                     help="built mode: skip rebuild, serve existing dist/")
     ap.add_argument("--no-install", action="store_true",
                     help="skip automatic npm install")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
     (serve_dev if args.dev else serve_built)(args)
 
 

@@ -3,6 +3,7 @@
 // with the same context menus. Composables keep the reactive plumbing in one
 // place; the MENU_ITEMS constants keep the menu definitions from drifting apart.
 import { ref, computed, watch } from 'vue'
+import { api } from './api'
 
 // Tri-state label filter (see labels.js): tap cycles ignore -> must-have -> exclude.
 export function useLabelFilter() {
@@ -83,4 +84,64 @@ export function fileMenuItems({ deletable = false, source = 'local' } = {}) {
     title: source === 'download' ? 'Delete downloaded file' : 'Delete local file',
   })
   return items
+}
+
+// Inline media-preview state shared by every list screen. Rows expose a stable
+// `key`; the preview key is `${row.key}|${mode}`. Split on the LAST '|' so keys
+// that themselves contain '|' (Import's folder|path fkey) still parse. Media
+// sources are read off the row so previewFor never needs per-screen branches:
+//   ytId -> embed / yt-audio,  fileSrc -> local audio,  downloadSrc -> download.
+export function usePreview() {
+  const previewKey = ref(null)
+  function toggle(row, mode) {
+    const k = `${row.key}|${mode}`
+    previewKey.value = previewKey.value === k ? null : k
+  }
+  function previewFor(row) {
+    if (!previewKey.value) return null
+    const cut = previewKey.value.lastIndexOf('|')
+    // Coerce: toggle() builds the key via a template literal (stringifies), but
+    // row.key may be a number (Workspace uses item.id) — compare like-for-like.
+    if (previewKey.value.slice(0, cut) !== String(row.key)) return null
+    const mode = previewKey.value.slice(cut + 1)
+    if (mode === 'embed') return { mode: 'embed', id: row.ytId }
+    if (mode === 'ytaudio') return { mode: 'audio', src: row.ytId ? api.ytAudioUrl(row.ytId) : null }
+    if (mode === 'local') return { mode: 'audio', src: row.fileSrc }
+    if (mode === 'download') return { mode: 'audio', src: row.downloadSrc }
+    return null
+  }
+  return { previewKey, toggle, previewFor }
+}
+
+// The one place each list action's LOGIC lives, so a fix lands everywhere at
+// once. The three dispatchers switch on the menu action and read everything
+// entity-specific off the row (ytUrl, trackId, setCheck, revealArg, infoFor,
+// media srcs) — so Workspace / Library / Import differ only in how their
+// row-normalizer fills those, never in what an action does. `deleteFile` is
+// injected because delete is genuinely per-screen (Library's approved/download
+// flows; Workspace/Import have none -> default no-op).
+export function useRowActions({ onError = () => {}, openReview = () => {}, deleteFile = () => {} } = {}) {
+  const preview = usePreview()
+  const fileInfo = ref(null)   // bind to <InfoDialog v-model>
+
+  function ytAction(mode, row) {
+    if (!row) return
+    if (mode === 'open') { if (row.ytUrl) window.open(row.ytUrl, '_blank', 'noopener') }
+    else if (mode === 'copy') { if (row.ytUrl) navigator.clipboard?.writeText(row.ytUrl) }
+    else if (mode === 'embed') preview.toggle(row, 'embed')
+    else if (mode === 'ytaudio') preview.toggle(row, 'ytaudio')
+  }
+  function fileAction(mode, row, source = 'local') {
+    if (!row) return
+    if (mode === 'play') preview.toggle(row, source === 'download' ? 'download' : 'local')
+    else if (mode === 'info') fileInfo.value = row.infoFor(source)
+    else if (mode === 'reveal') api.reveal(row.revealArg(source)).catch(onError)
+    else if (mode === 'delete') deleteFile(row, source)
+  }
+  async function statusAction(mode, row) {
+    if (!row?.trackId) return
+    if (mode === 'unreview') { try { await api.unreviewTrack(row.trackId); row.setCheck(null) } catch (e) { onError(e) } }
+    else if (mode === 'rereview') openReview(row)
+  }
+  return { preview, fileInfo, ytAction, fileAction, statusAction }
 }

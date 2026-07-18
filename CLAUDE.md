@@ -50,9 +50,16 @@ merged into Library.
   Exact handoff to Workspace; Review curation; **Verify links** (yt-dlp health
   → `tracks.yt_health`); **Remove** (deletes the Library entry + its downloaded
   file, never the mp3-folder file). Tri-state (Tachiyomi-style) label filter.
-- **Labels** (`labels.js` + `LabelRow.vue`, shared by Workspace + Library) are
-  clickable icon badges: YouTube, Local file, Downloaded, Untracked, Confirmed,
-  Rejected. Each opens a context menu (open/copy/play/reveal/delete/etc.).
+- **Labels** (`labels.js` + `LabelRow.vue`, shared by Workspace, Library, and
+  Import) are clickable icon badges: YouTube, Local file, Downloaded, Untracked,
+  Confirmed, Rejected. Each opens a context menu (open/copy/play/reveal/delete).
+- Workspace, Library, and Import-untracked render the same list via
+  `CurationList.vue`; the reactive plumbing and action dispatch live once in
+  `curation.js` (`useRowActions`/`usePreview`/`usePagination`/`useSelection`/
+  `useLabelFilter`). Each screen only supplies a row-normalizer (maps its entity
+  to a common row carrying `ytUrl`, `trackId`, `setCheck`, `revealArg`,
+  `infoFor`, media srcs) and injects genuinely per-screen bits (delete, review),
+  so an action fix lands on every screen at once.
 - Settings owns validated mp3 folders/rescan, the **Download folder** (separate
   destination; failed-download cleanup follows it), and credentials.
 - A **download** (file in the download folder, matched by `[<id>]` in name) is
@@ -63,6 +70,9 @@ merged into Library.
   Download-file deletion is the app's own output — simple confirm, no token.
 - `explorer /select` reveal + native tkinter folder picker are localhost-only
   (server host = user machine).
+- Serve/open the app by hostname (`localhost`), never a bare IP: YouTube's
+  embedded player rejects an IP-origin referer ("Video unavailable"). `run.py`
+  defaults `--host` to `localhost`; keep it a hostname.
 - Root scripts/plain files remain standalone compatibility, not app primary
   contract. Extension queue endpoint is compatibility only.
 

@@ -4,11 +4,10 @@ import { api } from './api'
 import { reviewTrack, activeTab, invalidateData, libraryFocusIds, useTabRefresh } from './nav'
 import { deletionMessage, formatBytes } from './workspace'
 import { buildLabels, FILTER_ATTRS, matchesLabelFilter } from './labels'
-import { useLabelFilter, usePagination, useSelection, ytUrl, YT_MENU_ITEMS, STATUS_MENU_ITEMS, fileMenuItems } from './curation'
-import LabelRow from './LabelRow.vue'
+import { useLabelFilter, usePagination, useSelection, useRowActions, ytUrl, YT_MENU_ITEMS, STATUS_MENU_ITEMS, fileMenuItems } from './curation'
+import CurationList from './CurationList.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
 import ActionMenu from './ActionMenu.vue'
-import MediaPreview from './MediaPreview.vue'
 import InfoDialog from './InfoDialog.vue'
 import TypedConfirmDialog from './TypedConfirmDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -39,13 +38,18 @@ const deleteOutcome = ref('')
 const verifying = ref(false)
 const removeConfirm = ref(null)   // { ids, count } pending confirmation
 const removing = ref(false)
-const previewKey = ref(null)      // `${item.key}|${mode}` currently previewing
-const ytMenu = ref({ open: false, target: [0, 0], item: null })
-const fileMenu = ref({ open: false, target: [0, 0], item: null, source: 'local' })
-const fileInfo = ref(null)        // { title, lines }
+const ytMenu = ref({ open: false, target: [0, 0], row: null })
+const fileMenu = ref({ open: false, target: [0, 0], row: null, source: 'local' })
 const downloadDeleteConfirm = ref(null)
-const statusMenu = ref({ open: false, target: [0, 0], item: null })
-const untrackedMenu = ref({ open: false, target: [0, 0], item: null })
+const statusMenu = ref({ open: false, target: [0, 0], row: null })
+const untrackedMenu = ref({ open: false, target: [0, 0], row: null })
+// Shared action logic (curation.js). Rows carry the entity data; deleteFile is
+// injected because Library's approved/download delete flows are screen-specific.
+const { preview, fileInfo, ytAction, fileAction, statusAction } = useRowActions({
+  onError: (e) => { error.value = String(e) },
+  openReview: (row) => openReview(row.raw),
+  deleteFile: (row, source) => deleteFile(row, source),
+})
 
 // Title falls back file name -> fetched YouTube title -> id; never blank.
 function trackTitle(row) { return row.title || row.yt_title || row.filename || row.yt_id || '(untitled)' }
@@ -105,6 +109,25 @@ const filtered = computed(() => {
 // Selection is keyed by entry.key so tracks and untracked files can both be picked.
 const fileCount = computed(() => filtered.value.filter((entry) => entry.kind === 'file').length)
 const { page, perPage, pageCount, paged } = usePagination(filtered, [labelFilter, query, sortBy, libraryFocusIds])
+// Fold the three-kind entry into one subtitle string; saved links become a link.
+function librarySubtitle(e) { return e.author ? (e.detail ? `${e.author} · ${e.detail}` : e.author) : (e.detail || '') }
+const listRows = computed(() => paged.value.map((e) => ({
+  ...e, selectable: e.kind !== 'saved',
+  subtitle: librarySubtitle(e), subtitleHref: e.kind === 'saved' ? e.detail : null,
+  // Action contract read by useRowActions.
+  ytUrl: ytUrl(e.raw), ytId: entryYtId(e),
+  trackId: e.kind === 'track' ? e.id : null,
+  setCheck: (v) => { const r = rows.value.find((x) => x.id === e.id); if (r) r.check = v },
+  fileSrc: localSrc(e), downloadSrc: entryYtId(e) ? api.downloadAudioUrl(entryYtId(e)) : null,
+  revealArg: (source) => source === 'download' ? { download_yt_id: entryYtId(e) }
+    : e.kind === 'track' ? { track_id: e.id }
+    : { folder_identity: e.raw.folder_identity, relative_path: e.raw.relative_path },
+  infoFor: (source) => source === 'download'
+    ? { title: 'Downloaded file', lines: [['YouTube id', entryYtId(e)], ['Location', 'Download folder']] }
+    : e.kind === 'file'
+      ? { title: 'File info', lines: [['File', e.raw.basename], ['Path', e.raw.relative_path], ['Size', formatBytes(e.raw.file_size)]] }
+      : { title: 'File info', lines: [['File', e.raw.filename], ['Artist', e.raw.artist || '—'], ['Title', e.raw.title || '—'], ['Duration', e.raw.duration ? `${Math.round(e.raw.duration)}s` : '—']] },
+})))
 const selectableKeys = computed(() => filtered.value.filter((entry) => entry.kind !== 'saved').map((entry) => entry.key))
 const { selected, allSelected: allVisible, toggle, toggleAll } = useSelection(selectableKeys)
 const selectedEntries = computed(() => { const set = new Set(selected.value); return entries.value.filter((entry) => set.has(entry.key)) })
@@ -152,19 +175,19 @@ function localSrc(e) {
   if (e.kind === 'file') return api.localAudioUrl(e.raw.folder_identity, e.raw.relative_path)
   return null
 }
-function onLabel(item, label, ev) {
+function onLabel(row, label, ev) {
   const target = [ev.clientX, ev.clientY]
-  if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, item }
-  else if (label.key === 'local') fileMenu.value = { open: true, target, item, source: 'local' }
-  else if (label.key === 'downloaded') fileMenu.value = { open: true, target, item, source: 'download' }
-  else if (label.key === 'confirmed' || label.key === 'rejected') statusMenu.value = { open: true, target, item }
-  else if (label.key === 'untracked') untrackedMenu.value = { open: true, target, item }
+  if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, row }
+  else if (label.key === 'local') fileMenu.value = { open: true, target, row, source: 'local' }
+  else if (label.key === 'downloaded') fileMenu.value = { open: true, target, row, source: 'download' }
+  else if (label.key === 'confirmed' || label.key === 'rejected') statusMenu.value = { open: true, target, row }
+  else if (label.key === 'untracked') untrackedMenu.value = { open: true, target, row }
 }
 async function untrackedAction(mode) {
-  const item = untrackedMenu.value.item; untrackedMenu.value.open = false
-  if (!item) return
-  if (mode === 'add') await addFileToLibrary(item.raw)
-  else if (mode === 'send') await sendFileToWorkspace(item.raw)
+  const row = untrackedMenu.value.row; untrackedMenu.value.open = false
+  if (!row) return
+  if (mode === 'add') await addFileToLibrary(row.raw)
+  else if (mode === 'send') await sendFileToWorkspace(row.raw)
 }
 async function sendFileToWorkspace(file) {
   matching.value = `f${file.folder_identity}-${file.relative_path}`; error.value = ''; notice.value = ''
@@ -176,65 +199,23 @@ async function sendFileToWorkspace(file) {
   } catch (e) { error.value = String(e) }
   finally { matching.value = null }
 }
-async function statusAction(mode) {
-  const item = statusMenu.value.item; statusMenu.value.open = false
-  if (!item) return
-  if (mode === 'unreview') { try { await api.unreviewTrack(item.id); invalidateData(); await load() } catch (e) { error.value = String(e) } }
-  else if (mode === 'rereview') openReview(item.raw)
-}
-function setPreview(item, mode) { const key = `${item.key}|${mode}`; previewKey.value = previewKey.value === key ? null : key }
-function previewFor(item) {
-  if (!previewKey.value) return null
-  const [key, mode] = previewKey.value.split('|')
-  if (key !== item.key) return null
-  if (mode === 'embed') return { mode: 'embed', id: entryYtId(item) }
-  if (mode === 'ytaudio') { const id = entryYtId(item); return { mode: 'audio', src: id ? api.ytAudioUrl(id) : null } }
-  if (mode === 'local') return { mode: 'audio', src: localSrc(item) }
-  if (mode === 'download') { const id = entryYtId(item); return { mode: 'audio', src: id ? api.downloadAudioUrl(id) : null } }
-  return null
-}
-function ytAction(mode) {
-  const e = ytMenu.value.item; ytMenu.value.open = false
-  if (!e) return
-  if (mode === 'open') { const u = ytUrl(e.raw); if (u) window.open(u, '_blank', 'noopener') }
-  else if (mode === 'copy') { const u = ytUrl(e.raw); if (u) navigator.clipboard?.writeText(u) }
-  else if (mode === 'embed') setPreview(e, 'embed')
-  else if (mode === 'ytaudio') setPreview(e, 'ytaudio')
-}
+// File menu delete row exists here (Library manages deletion); source picks the
+// wording. The play/info/reveal branches live in the shared fileAction.
 const fileMenuList = computed(() => fileMenuItems({ deletable: true, source: fileMenu.value.source }))
-function fileAction(mode) {
-  const { item, source } = fileMenu.value; fileMenu.value.open = false
-  if (!item) return
-  if (mode === 'play') setPreview(item, source)
-  else if (mode === 'info') showInfo(item, source)
-  else if (mode === 'reveal') doReveal(item, source)
-  else if (mode === 'delete') deleteFile(item, source)
+// Injected into useRowActions.fileAction. Download = simple confirm (app output);
+// mp3-folder file = approved-delete flow; untracked file must be added first.
+function deleteFile(row, source) {
+  if (source === 'download') { downloadDeleteConfirm.value = { row }; return }
+  if (row.kind === 'file') { error.value = 'Add this file to Library first to manage its deletion.'; return }
+  previewDeleteOne(row)
 }
-async function doReveal(item, source) {
-  try {
-    if (source === 'download') await api.reveal({ download_yt_id: entryYtId(item) })
-    else if (item.kind === 'track') await api.reveal({ track_id: item.id })
-    else if (item.kind === 'file') await api.reveal({ folder_identity: item.raw.folder_identity, relative_path: item.raw.relative_path })
-  } catch (e) { error.value = String(e) }
-}
-function showInfo(item, source) {
-  const r = item.raw
-  if (source === 'download') { fileInfo.value = { title: 'Downloaded file', lines: [['YouTube id', entryYtId(item)], ['Location', 'Download folder']] }; return }
-  if (item.kind === 'file') fileInfo.value = { title: 'File info', lines: [['File', r.basename], ['Path', r.relative_path], ['Size', formatBytes(r.file_size)]] }
-  else fileInfo.value = { title: 'File info', lines: [['File', r.filename], ['Artist', r.artist || '—'], ['Title', r.title || '—'], ['Duration', r.duration ? `${Math.round(r.duration)}s` : '—']] }
-}
-function deleteFile(item, source) {
-  if (source === 'download') { downloadDeleteConfirm.value = { item }; return }
-  if (item.kind === 'file') { error.value = 'Add this file to Library first to manage its deletion.'; return }
-  previewDeleteOne(item)   // mp3-folder file: route through the approved-delete flow
-}
-async function previewDeleteOne(item) {
-  try { deletePreview.value = await api.deletePreview([item.id]) }
+async function previewDeleteOne(row) {
+  try { deletePreview.value = await api.deletePreview([row.id]) }
   catch (e) { error.value = String(e) }
 }
 async function confirmDownloadDelete() {
-  const item = downloadDeleteConfirm.value.item; downloadDeleteConfirm.value = null
-  try { await api.downloadDelete([entryYtId(item)]); notice.value = 'Downloaded file deleted.'; invalidateData(); await load() }
+  const row = downloadDeleteConfirm.value.row; downloadDeleteConfirm.value = null
+  try { await api.downloadDelete([row.ytId]); notice.value = 'Downloaded file deleted.'; invalidateData(); await load() }
   catch (e) { error.value = String(e) }
 }
 async function openReview(row) {
@@ -354,47 +335,26 @@ useTabRefresh('library', load)
   <v-alert v-if="notice" type="info" variant="tonal" closable class="mb-3" @click:close="notice=''">{{ notice }}</v-alert>
   <v-alert v-if="deleteOutcome" type="info" variant="tonal" closable class="mb-3" @click:close="deleteOutcome=''">{{ deleteOutcome }}</v-alert>
 
-  <v-card variant="outlined">
-    <div v-if="loading" class="pa-12 text-center"><v-progress-circular indeterminate color="primary" /></div>
-    <template v-else>
-      <v-list v-if="filtered.length" lines="two" density="compact">
-        <template v-for="item in paged" :key="item.key">
-          <v-list-item>
-            <template #prepend>
-              <v-checkbox-btn v-if="item.kind !== 'saved'" :model-value="selected.includes(item.key)" density="compact" :aria-label="`Select ${item.title}`" @update:model-value="toggle(item.key)" />
-              <span v-else class="select-spacer" />
-            </template>
-            <v-list-item-title class="font-weight-medium">{{ item.title }}<span v-if="item.kind === 'track'" class="text-caption text-medium-emphasis ml-2">#{{ item.id }}</span></v-list-item-title>
-            <v-list-item-subtitle>
-              <span v-if="item.author">{{ item.author }}</span>
-              <a v-else-if="item.kind === 'saved'" :href="item.detail" target="_blank" rel="noopener noreferrer">{{ item.detail }}</a>
-              <span v-else class="text-medium-emphasis">{{ item.detail || '—' }}</span>
-              <span v-if="item.author && item.detail" class="text-medium-emphasis"> · {{ item.detail }}</span>
-            </v-list-item-subtitle>
-            <template #append>
-              <LabelRow :labels="item.labels" class="mx-1" @label-click="(label, ev) => onLabel(item, label, ev)" />
-              <v-btn v-if="item.kind === 'saved'" size="small" variant="tonal" @click="matchingLink = item.raw; matchFile = null">Match local file</v-btn>
-              <v-menu v-if="item.kind === 'track'">
-                <template #activator="{ props }">
-                  <v-btn icon="mdi-dots-vertical" size="small" variant="text" aria-label="Track actions" v-bind="props" />
-                </template>
-                <v-list density="compact" min-width="160">
-                  <v-list-item prepend-icon="mdi-eye-check-outline" title="Review" @click="openReview(item.raw)" />
-                  <v-list-item prepend-icon="mdi-delete-outline" title="Remove from Library" base-color="error" @click="askRemove([item.id])" />
-                </v-list>
-              </v-menu>
-            </template>
-          </v-list-item>
-          <MediaPreview :preview="previewFor(item)" />
+  <div v-if="loading" class="pa-12 text-center"><v-progress-circular indeterminate color="primary" /></div>
+  <CurationList v-else
+    :rows="listRows" :selected="selected" :preview-for="preview.previewFor"
+    v-model:page="page" v-model:per-page="perPage" :page-count="pageCount" :has-items="entries.length > 0"
+    @toggle="(row) => toggle(row.key)" @label="onLabel">
+    <template #badge="{ row }"><span v-if="row.kind === 'track'" class="text-caption text-medium-emphasis ml-2">#{{ row.id }}</span></template>
+    <template #actions="{ row }">
+      <v-btn v-if="row.kind === 'saved'" size="small" variant="tonal" @click="matchingLink = row.raw; matchFile = null">Match local file</v-btn>
+      <v-menu v-else-if="row.kind === 'track'">
+        <template #activator="{ props }">
+          <v-btn icon="mdi-dots-vertical" size="small" variant="text" aria-label="Track actions" v-bind="props" />
         </template>
-      </v-list>
-      <div v-else class="pa-6 text-medium-emphasis">Nothing matches this filter.</div>
-      <div v-if="filtered.length" class="d-flex align-center justify-space-between px-3 py-2 border-t">
-        <v-select v-model="perPage" :items="[25,50,100,200]" density="compact" variant="plain" hide-details style="max-width:88px" />
-        <v-pagination v-model="page" :length="pageCount" density="comfortable" :total-visible="6" />
-      </div>
+        <v-list density="compact" min-width="160">
+          <v-list-item prepend-icon="mdi-eye-check-outline" title="Review" @click="openReview(row.raw)" />
+          <v-list-item prepend-icon="mdi-delete-outline" title="Remove from Library" base-color="error" @click="askRemove([row.id])" />
+        </v-list>
+      </v-menu>
     </template>
-  </v-card>
+    <template #empty><div class="pa-6 text-medium-emphasis">Nothing here yet.</div></template>
+  </CurationList>
 
   <v-dialog v-model="matchingLink" max-width="620"><v-card v-if="matchingLink"><v-card-title>Match saved link to local track</v-card-title><v-card-text><div class="text-body-2 mb-3">Choose existing Library file. This preserves exact folder identity.</div><v-list lines="two"><v-list-item v-for="file in localFiles.filter((item) => item.tracks.length)" :key="`${file.folder_identity}-${file.relative_path}`" :active="matchFile === file" @click="matchFile = file"><v-list-item-title>{{ fileLabel(file) }}</v-list-item-title><v-list-item-subtitle>{{ file.tracks.map((track) => `${track.artist || ''} ${track.title || track.filename || ''}`).join(', ') }}</v-list-item-subtitle></v-list-item></v-list></v-card-text><v-card-actions><v-spacer /><v-btn variant="text" @click="matchingLink = null">Cancel</v-btn><v-btn color="primary" :disabled="!matchFile" @click="matchSavedLink">Match exact file</v-btn></v-card-actions></v-card></v-dialog>
   <TypedConfirmDialog :model-value="!!deletePreview" :title="`Delete ${deletePreview?.targets.length} approved local files?`" :loading="deleteBusy" @update:model-value="(v) => { if (!v) deletePreview = null }" @confirm="confirmDelete">
@@ -403,9 +363,9 @@ useTabRefresh('library', load)
   </TypedConfirmDialog>
   <v-alert v-if="audit.length" variant="tonal" type="info" class="mt-3">Last deletion audit: {{ audit.filter((entry) => entry.outcome === 'deleted').length }} deleted, {{ audit.filter((entry) => entry.outcome !== 'deleted').length }} rejected.</v-alert>
 
-  <ActionMenu v-model="ytMenu.open" :target="ytMenu.target" :items="YT_MENU_ITEMS" @select="ytAction" />
-  <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="fileMenuList" @select="fileAction" />
-  <ActionMenu v-model="statusMenu.open" :target="statusMenu.target" :items="STATUS_MENU_ITEMS" @select="statusAction" />
+  <ActionMenu v-model="ytMenu.open" :target="ytMenu.target" :items="YT_MENU_ITEMS" @select="(mode) => { ytAction(mode, ytMenu.row); ytMenu.open = false }" />
+  <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="fileMenuList" @select="(mode) => { fileAction(mode, fileMenu.row, fileMenu.source); fileMenu.open = false }" />
+  <ActionMenu v-model="statusMenu.open" :target="statusMenu.target" :items="STATUS_MENU_ITEMS" @select="(mode) => { statusAction(mode, statusMenu.row); statusMenu.open = false }" />
   <ActionMenu v-model="untrackedMenu.open" :target="untrackedMenu.target" :items="UNTRACKED_MENU_ITEMS" @select="untrackedAction" />
   <InfoDialog v-model="fileInfo" />
   <ConfirmDialog :model-value="!!downloadDeleteConfirm" title="Delete downloaded file?" confirm-label="Delete" :max-width="440" @update:model-value="(v) => { if (!v) downloadDeleteConfirm = null }" @confirm="confirmDownloadDelete">
@@ -417,8 +377,3 @@ useTabRefresh('library', load)
   </ConfirmDialog>
 </template>
 
-<style scoped>
-.select-spacer { display: inline-block; width: 40px; }
-.border-b { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
-.border-t { border-top: 1px solid rgba(255, 255, 255, 0.08); }
-</style>

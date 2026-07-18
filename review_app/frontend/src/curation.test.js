@@ -1,6 +1,20 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ref, nextTick } from 'vue'
-import { useLabelFilter, usePagination, useSelection, ytUrl, fileMenuItems } from './curation'
+
+// Mock the network layer so the shared dispatchers can be exercised as pure logic.
+vi.mock('./api', () => ({
+  api: {
+    unreviewTrack: vi.fn().mockResolvedValue({}),
+    reveal: vi.fn().mockResolvedValue({}),
+    ytAudioUrl: (id) => `yt:${id}`,
+    downloadAudioUrl: (id) => `dl:${id}`,
+  },
+}))
+import { api } from './api'
+import {
+  useLabelFilter, usePagination, useSelection, ytUrl, fileMenuItems,
+  usePreview, useRowActions,
+} from './curation'
 
 describe('useLabelFilter tri-state cycle', () => {
   it('cycles ignore -> must-have -> exclude -> ignore', () => {
@@ -66,5 +80,61 @@ describe('fileMenuItems', () => {
     const del = fileMenuItems({ deletable: true, source: 'download' }).at(-1)
     expect(del.action).toBe('delete')
     expect(del.title).toBe('Delete downloaded file')
+  })
+})
+
+describe('usePreview', () => {
+  it('toggles per (key, mode) and resolves media off the row; key may contain "|"', () => {
+    const { toggle, previewFor } = usePreview()
+    const row = { key: 'fld|path', ytId: 'v', fileSrc: 'local.mp3', downloadSrc: 'd.mp3' }
+    expect(previewFor(row)).toBeNull()
+    toggle(row, 'local')                                    // key has a '|' -> split on last one
+    expect(previewFor(row)).toEqual({ mode: 'audio', src: 'local.mp3' })
+    toggle(row, 'embed')                                    // switch mode
+    expect(previewFor(row)).toEqual({ mode: 'embed', id: 'v' })
+    toggle(row, 'embed')                                    // same -> close
+    expect(previewFor(row)).toBeNull()
+    toggle(row, 'ytaudio')
+    expect(previewFor(row)).toEqual({ mode: 'audio', src: 'yt:v' })
+  })
+  it('matches a numeric row.key (Workspace uses item.id) not just strings', () => {
+    const { toggle, previewFor } = usePreview()
+    const row = { key: 123, ytId: 'v' }               // number, as Workspace feeds it
+    toggle(row, 'embed')
+    expect(previewFor(row)).toEqual({ mode: 'embed', id: 'v' })
+  })
+})
+
+describe('useRowActions dispatchers (fixed once, used by every screen)', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it('statusAction: unreview clears the mark via setCheck; rereview routes to openReview', async () => {
+    const openReview = vi.fn()
+    const { statusAction } = useRowActions({ openReview })
+    const setCheck = vi.fn()
+    await statusAction('unreview', { trackId: 7, setCheck })
+    expect(api.unreviewTrack).toHaveBeenCalledWith(7)
+    expect(setCheck).toHaveBeenCalledWith(null)
+    const row = { trackId: 7 }
+    await statusAction('rereview', row)
+    expect(openReview).toHaveBeenCalledWith(row)
+  })
+
+  it('statusAction: no track id -> no-op', async () => {
+    const { statusAction } = useRowActions({})
+    await statusAction('unreview', { trackId: null, setCheck: vi.fn() })
+    expect(api.unreviewTrack).not.toHaveBeenCalled()
+  })
+
+  it('fileAction: reveal uses row.revealArg(source); delete is injected per screen', () => {
+    const deleteFile = vi.fn()
+    const { fileAction, fileInfo } = useRowActions({ deleteFile })
+    const row = { key: 'k', revealArg: (s) => ({ src: s }), infoFor: (s) => ({ title: s, lines: [] }) }
+    fileAction('reveal', row, 'download')
+    expect(api.reveal).toHaveBeenCalledWith({ src: 'download' })
+    fileAction('info', row, 'local')
+    expect(fileInfo.value).toEqual({ title: 'local', lines: [] })
+    fileAction('delete', row, 'download')
+    expect(deleteFile).toHaveBeenCalledWith(row, 'download')
   })
 })

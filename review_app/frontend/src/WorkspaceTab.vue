@@ -8,11 +8,10 @@ import {
   nameMatchScore,
 } from './workspace'
 import { buildLabels, FILTER_ATTRS, matchesLabelFilter } from './labels'
-import { useLabelFilter, usePagination, useSelection, ytUrl, YT_MENU_ITEMS, STATUS_MENU_ITEMS, fileMenuItems } from './curation'
-import LabelRow from './LabelRow.vue'
+import { useLabelFilter, usePagination, useSelection, useRowActions, ytUrl, YT_MENU_ITEMS, STATUS_MENU_ITEMS, fileMenuItems } from './curation'
+import CurationList from './CurationList.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
 import ActionMenu from './ActionMenu.vue'
-import MediaPreview from './MediaPreview.vue'
 import InfoDialog from './InfoDialog.vue'
 
 // Workspace items can't be saved-links or untracked files — hide those attrs.
@@ -42,11 +41,14 @@ const findLocalOpen = ref(false)
 const findLocalResults = ref([])
 const findYtOpen = ref(false)
 const findYtItems = ref([])
-const previewKey = ref(null)
-const ytMenu = ref({ open: false, target: [0, 0], item: null })
-const fileMenu = ref({ open: false, target: [0, 0], item: null })
-const statusMenu = ref({ open: false, target: [0, 0], item: null })
-const fileInfo = ref(null)
+const ytMenu = ref({ open: false, target: [0, 0], row: null })
+const fileMenu = ref({ open: false, target: [0, 0], row: null })
+const statusMenu = ref({ open: false, target: [0, 0], row: null })
+// Shared action logic (curation.js). Rows carry the entity-specific data below.
+const { preview, fileInfo, ytAction, fileAction, statusAction } = useRowActions({
+  onError: (e) => { error.value = String(e) },
+  openReview: async (row) => { try { reviewTrack(await api.track(row.trackId)) } catch (e) { error.value = String(e) } },
+})
 
 const liveItems = computed(() => items.value.filter((item) => !isDead(item)))
 const { selected, allSelected, toggle, toggleAll } = useSelection(computed(() => liveItems.value.map((item) => item.id)))
@@ -62,6 +64,25 @@ const displayItems = computed(() => {
   return list
 })
 const { page, perPage, pageCount, paged: pagedItems } = usePagination(displayItems, [labelFilter, query, sortBy])
+// Normalize the visible page into the shared CurationList row shape + the
+// action contract useRowActions reads (ytUrl/ytId/trackId/setCheck/…).
+const listRows = computed(() => pagedItems.value.map((item) => ({
+  key: item.id, raw: item,
+  selectable: !isDead(item), dead: isDead(item),
+  title: itemName(item),
+  subtitle: (itemAuthor(item) ? `${itemAuthor(item)} · ` : '') + subtitle(item),
+  labels: labelsFor(item),
+  ytUrl: ytUrl(item), ytId: item.youtube_id,
+  trackId: item.track_id || null,
+  setCheck: (v) => { item.track_check = v },
+  fileSrc: wsLocalSrc(item), downloadSrc: null,
+  revealArg: () => item.relative_path
+    ? { folder_identity: item.folder_identity, relative_path: item.relative_path }
+    : { track_id: item.track_id },
+  infoFor: () => item.relative_path
+    ? { title: 'File info', lines: [['File', item.relative_path.split(/[\\/]/).pop()], ['Path', item.relative_path]] }
+    : { title: 'File info', lines: [['File', item.track_filename || '—'], ['Artist', item.track_artist || '—'], ['Title', item.track_title || '—'], ['Local files', String(item.local_count || 0)]] },
+})))
 
 async function load() {
   loading.value = true
@@ -153,47 +174,14 @@ function wsLocalSrc(item) {
   if (item.relative_path) return api.localAudioUrl(item.folder_identity, item.relative_path)
   return item.track_id ? api.audioUrl(item.track_id) : null
 }
-function onLabel(item, label, ev) {
+// A label click opens the matching shared menu; the normalized row carries the
+// action data. unreview patches track_check locally (labelsFor recomputes),
+// rereview routes through openReview above — both fixed once in useRowActions.
+function onLabel(row, label, ev) {
   const target = [ev.clientX, ev.clientY]
-  if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, item }
-  else if (label.key === 'local' || label.key === 'untracked') fileMenu.value = { open: true, target, item }
-  else if (label.key === 'confirmed' || label.key === 'rejected') statusMenu.value = { open: true, target, item }
-}
-function setPreview(item, mode) { const key = `${item.id}|${mode}`; previewKey.value = previewKey.value === key ? null : key }
-function previewFor(item) {
-  if (!previewKey.value) return null
-  const [id, mode] = previewKey.value.split('|')
-  if (String(item.id) !== id) return null
-  if (mode === 'embed') return { mode: 'embed', id: item.youtube_id }
-  if (mode === 'ytaudio') return { mode: 'audio', src: item.youtube_id ? api.ytAudioUrl(item.youtube_id) : null }
-  if (mode === 'local') return { mode: 'audio', src: wsLocalSrc(item) }
-  return null
-}
-function ytAction(mode) {
-  const e = ytMenu.value.item; ytMenu.value.open = false
-  if (!e) return
-  if (mode === 'open') { const u = ytUrl(e); if (u) window.open(u, '_blank', 'noopener') }
-  else if (mode === 'copy') { const u = ytUrl(e); if (u) navigator.clipboard?.writeText(u) }
-  else if (mode === 'embed') setPreview(e, 'embed')
-  else if (mode === 'ytaudio') setPreview(e, 'ytaudio')
-}
-function fileAction(mode) {
-  const item = fileMenu.value.item; fileMenu.value.open = false
-  if (!item) return
-  if (mode === 'play') setPreview(item, 'local')
-  else if (mode === 'info') {
-    if (item.relative_path) fileInfo.value = { title: 'File info', lines: [['File', item.relative_path.split(/[\\/]/).pop()], ['Path', item.relative_path]] }
-    else fileInfo.value = { title: 'File info', lines: [['File', item.track_filename || '—'], ['Artist', item.track_artist || '—'], ['Title', item.track_title || '—'], ['Local files', String(item.local_count || 0)]] }
-  } else if (mode === 'reveal') {
-    if (item.relative_path) api.reveal({ folder_identity: item.folder_identity, relative_path: item.relative_path }).catch((e) => { error.value = String(e) })
-    else if (item.track_id) api.reveal({ track_id: item.track_id }).catch((e) => { error.value = String(e) })
-  }
-}
-async function statusAction(mode) {
-  const item = statusMenu.value.item; statusMenu.value.open = false
-  if (!item?.track_id) return
-  if (mode === 'unreview') { try { await api.unreviewTrack(item.track_id); invalidateData(); await load() } catch (e) { error.value = String(e) } }
-  else if (mode === 'rereview') { try { reviewTrack(await api.track(item.track_id)) } catch (e) { error.value = String(e) } }
+  if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, row }
+  else if (label.key === 'local' || label.key === 'untracked') fileMenu.value = { open: true, target, row }
+  else if (label.key === 'confirmed' || label.key === 'rejected') statusMenu.value = { open: true, target, row }
 }
 function itemSearchName(item) { return itemMeta(item).title || itemTitle(item) || item.youtube_id }
 async function findLocal() {
@@ -261,7 +249,8 @@ onUnmounted(() => clearInterval(poll))
     <v-chip color="primary" variant="tonal">{{ items.length }} items · {{ selected.length }} selected</v-chip>
   </div>
 
-  <v-alert v-if="run" variant="tonal" :type="run.status === 'done' ? 'success' : run.status === 'failed' ? 'error' : 'info'" class="mb-4" role="status">
+  <v-alert v-if="run" variant="tonal" :type="run.status === 'done' ? 'success' : run.status === 'failed' ? 'error' : 'info'" class="mb-4" role="status"
+    :closable="run.status === 'done' || run.status === 'failed'" @click:close="run = null">
     Audio download: <strong>{{ run.status }}</strong>. {{ run.error_text || `${run.items?.length || 0} snapshotted items` }}
   </v-alert>
   <v-alert v-if="batchDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Playlist', batchDuplicates) }}</v-alert>
@@ -317,51 +306,38 @@ onUnmounted(() => clearInterval(poll))
     </v-menu>
   </v-toolbar>
 
-  <v-card class="workspace-list">
-    <v-list v-if="displayItems.length" lines="two" density="compact">
-      <template v-for="item in pagedItems" :key="item.id">
-      <v-list-item class="workspace-row" :class="{ 'is-dead': isDead(item) }">
-        <template #prepend>
-          <v-checkbox-btn :model-value="selected.includes(item.id)" :disabled="isDead(item)" density="compact" :aria-label="`Select ${itemTitle(item)}`" @update:model-value="toggle(item.id)" />
+  <CurationList
+    :rows="listRows" :selected="selected" :preview-for="preview.previewFor"
+    v-model:page="page" v-model:per-page="perPage" :page-count="pageCount" :has-items="items.length > 0"
+    @toggle="(row) => toggle(row.key)" @label="onLabel">
+    <template #badge="{ row }">
+      <v-icon v-if="itemMeta(row.raw).verified" size="12" class="ml-1 text-medium-emphasis" title="Verified channel">mdi-check-decagram</v-icon>
+    </template>
+    <template #actions="{ row }">
+      <v-menu>
+        <template #activator="{ props }">
+          <v-btn icon="mdi-dots-vertical" size="small" variant="text" aria-label="Item actions" v-bind="props" />
         </template>
-        <v-list-item-title class="font-weight-medium">
-          <span :class="{ 'dead-text': isDead(item) }">{{ itemName(item) }}</span>
-          <v-icon v-if="itemMeta(item).verified" size="12" class="ml-1 text-medium-emphasis" title="Verified channel">mdi-check-decagram</v-icon>
-        </v-list-item-title>
-        <v-list-item-subtitle><span v-if="itemAuthor(item)">{{ itemAuthor(item) }} · </span>{{ subtitle(item) }}</v-list-item-subtitle>
-        <template #append>
-          <LabelRow :labels="labelsFor(item)" class="mx-1" @label-click="(label, ev) => onLabel(item, label, ev)" />
-          <v-menu>
-            <template #activator="{ props }">
-              <v-btn icon="mdi-dots-vertical" size="small" variant="text" aria-label="Item actions" v-bind="props" />
-            </template>
-            <v-list density="compact" min-width="180">
-              <template v-if="item.youtube_url && !isDead(item)">
-                <v-list-item prepend-icon="mdi-open-in-new" title="Open in new tab" :href="item.youtube_url" target="_blank" rel="noopener noreferrer" />
-                <v-list-item prepend-icon="mdi-content-copy" title="Copy link" @click="copy(item.youtube_url)" />
-                <v-list-item prepend-icon="mdi-bookmark-plus-outline" title="Save to Library" @click="saveToLibrary([item.id])" />
-              </template>
-              <v-list-item v-if="!item.youtube_url || isDead(item)" prepend-icon="mdi-magnify" title="Find YouTube link" :href="ytSearchUrl(item)" target="_blank" rel="noopener noreferrer" />
-              <v-list-item v-if="item.track_id" prepend-icon="mdi-library" title="Show in library" @click="showInLibrary([item.track_id])" />
-              <v-list-item prepend-icon="mdi-delete-outline" title="Remove" base-color="error" @click="removeItems([item.id])" />
-            </v-list>
-          </v-menu>
-        </template>
-      </v-list-item>
-      <MediaPreview :preview="previewFor(item)" />
-      </template>
-    </v-list>
-    <v-empty-state v-else-if="!items.length" icon="mdi-youtube-play" title="Workspace is empty" text="Open Import to add YouTube IDs, or send exact tracks from Library." action-text="Open Import" @click:action="activeTab = 'import'" />
-    <div v-else class="pa-8 text-center text-medium-emphasis">No items match this filter.</div>
-    <div v-if="displayItems.length" class="d-flex align-center justify-space-between px-3 py-2 workspace-foot">
-      <v-select v-model="perPage" :items="[25,50,100,200]" density="compact" variant="plain" hide-details style="max-width:88px" />
-      <v-pagination v-model="page" :length="pageCount" density="comfortable" :total-visible="6" />
-    </div>
-  </v-card>
+        <v-list density="compact" min-width="180">
+          <template v-if="row.raw.youtube_url && !row.dead">
+            <v-list-item prepend-icon="mdi-open-in-new" title="Open in new tab" :href="row.raw.youtube_url" target="_blank" rel="noopener noreferrer" />
+            <v-list-item prepend-icon="mdi-content-copy" title="Copy link" @click="copy(row.raw.youtube_url)" />
+            <v-list-item prepend-icon="mdi-bookmark-plus-outline" title="Save to Library" @click="saveToLibrary([row.key])" />
+          </template>
+          <v-list-item v-if="!row.raw.youtube_url || row.dead" prepend-icon="mdi-magnify" title="Find YouTube link" :href="ytSearchUrl(row.raw)" target="_blank" rel="noopener noreferrer" />
+          <v-list-item v-if="row.raw.track_id" prepend-icon="mdi-library" title="Show in library" @click="showInLibrary([row.raw.track_id])" />
+          <v-list-item prepend-icon="mdi-delete-outline" title="Remove" base-color="error" @click="removeItems([row.key])" />
+        </v-list>
+      </v-menu>
+    </template>
+    <template #empty>
+      <v-empty-state icon="mdi-youtube-play" title="Workspace is empty" text="Open Import to add YouTube IDs, or send exact tracks from Library." action-text="Open Import" @click:action="activeTab = 'import'" />
+    </template>
+  </CurationList>
 
-  <ActionMenu v-model="ytMenu.open" :target="ytMenu.target" :items="YT_MENU_ITEMS" @select="ytAction" />
-  <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="FILE_MENU_ITEMS" @select="fileAction" />
-  <ActionMenu v-model="statusMenu.open" :target="statusMenu.target" :items="STATUS_MENU_ITEMS" @select="statusAction" />
+  <ActionMenu v-model="ytMenu.open" :target="ytMenu.target" :items="YT_MENU_ITEMS" @select="(mode) => { ytAction(mode, ytMenu.row); ytMenu.open = false }" />
+  <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="FILE_MENU_ITEMS" @select="(mode) => { fileAction(mode, fileMenu.row); fileMenu.open = false }" />
+  <ActionMenu v-model="statusMenu.open" :target="statusMenu.target" :items="STATUS_MENU_ITEMS" @select="(mode) => { statusAction(mode, statusMenu.row); statusMenu.open = false }" />
   <InfoDialog v-model="fileInfo" />
 
   <v-dialog v-model="findLocalOpen" max-width="720" scrollable>
@@ -435,7 +411,3 @@ onUnmounted(() => clearInterval(poll))
   </v-dialog>
 </template>
 
-<style scoped>
-.dead-text { text-decoration: line-through; opacity: 0.6; }
-.workspace-row.is-dead { opacity: 0.75; }
-</style>

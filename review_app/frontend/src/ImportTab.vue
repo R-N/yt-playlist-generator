@@ -3,18 +3,36 @@ import { computed, ref, watch } from 'vue'
 import { api } from './api'
 import { invalidateData } from './nav'
 import { parsePaste } from './import'
-import { useSelection } from './curation'
+import { useSelection, usePagination, useRowActions, fileMenuItems } from './curation'
+import { buildLabels } from './labels'
+import CurationList from './CurationList.vue'
+import ActionMenu from './ActionMenu.vue'
+import InfoDialog from './InfoDialog.vue'
 
 const flow = ref('paste')
 const untracked = ref([])
 const { selected: selectedFiles, toggle } = useSelection()   // fkey list
-const previewKey = ref(null)
 const filesBusy = ref('')
 const fileNotice = ref('')
 const fkey = (file) => `${file.folder_identity}|${file.relative_path}`
-const toggleFile = (file) => toggle(fkey(file))
 const selectedFileRefs = computed(() => untracked.value.filter((file) => selectedFiles.value.includes(fkey(file)))
   .map((file) => ({ folder_identity: file.folder_identity, relative_path: file.relative_path })))
+
+// Same list look AND same action logic as Workspace/Library. Untracked files
+// only need the file menu (play/info/reveal); no yt/status/delete here.
+const { page, perPage, pageCount, paged } = usePagination(untracked)
+const listRows = computed(() => paged.value.map((file) => ({
+  key: fkey(file), raw: file, selectable: true,
+  title: file.basename, subtitle: file.relative_path,
+  labels: buildLabels({ localCount: 1, untracked: true }),
+  fileSrc: api.localAudioUrl(file.folder_identity, file.relative_path),
+  revealArg: () => ({ folder_identity: file.folder_identity, relative_path: file.relative_path }),
+  infoFor: () => ({ title: 'File info', lines: [['File', file.basename], ['Path', file.relative_path]] }),
+})))
+const FILE_MENU_ITEMS = fileMenuItems()   // no delete row for untracked files
+const fileMenu = ref({ open: false, target: [0, 0], row: null })
+const { preview, fileInfo, fileAction } = useRowActions({ onError: (e) => { error.value = String(e) } })
+function onLabel(row, label, ev) { fileMenu.value = { open: true, target: [ev.clientX, ev.clientY], row } }
 async function loadUntracked() {
   try { untracked.value = (await api.localFiles()).files.filter((file) => !file.tracks?.length) }
   catch (e) { error.value = String(e) }
@@ -115,26 +133,18 @@ function copy(value) { navigator.clipboard?.writeText(value) }
           <v-btn size="small" variant="text" icon="mdi-refresh" aria-label="Rescan" @click="loadUntracked" />
         </div>
         <v-alert v-if="fileNotice" type="info" variant="tonal" closable class="mb-3" @click:close="fileNotice = ''">{{ fileNotice }}</v-alert>
-        <v-list v-if="untracked.length" lines="two" density="compact">
-          <template v-for="file in untracked" :key="fkey(file)">
-            <v-list-item>
-              <template #prepend>
-                <v-checkbox-btn :model-value="selectedFiles.includes(fkey(file))" density="compact" @update:model-value="toggleFile(file)" />
-              </template>
-              <v-list-item-title>{{ file.basename }}</v-list-item-title>
-              <v-list-item-subtitle>{{ file.relative_path }}</v-list-item-subtitle>
-              <template #append>
-                <v-btn icon="mdi-play-circle-outline" size="small" variant="text" aria-label="Preview" @click="previewKey = previewKey === fkey(file) ? null : fkey(file)" />
-                <v-btn icon="mdi-plus-box" size="small" variant="text" color="primary" :loading="filesBusy === 'add'" aria-label="Add to Library" @click="addFiles([{ folder_identity: file.folder_identity, relative_path: file.relative_path }])" />
-                <v-btn icon="mdi-send" size="small" variant="text" color="primary" :loading="filesBusy === 'send'" aria-label="Send to Workspace" @click="sendFiles([{ folder_identity: file.folder_identity, relative_path: file.relative_path }])" />
-              </template>
-            </v-list-item>
-            <div v-if="previewKey === fkey(file)" class="px-4 pb-2">
-              <audio :src="api.localAudioUrl(file.folder_identity, file.relative_path)" controls preload="none" style="width:100%" />
-            </div>
+        <CurationList v-if="untracked.length"
+          :rows="listRows" :selected="selectedFiles" :preview-for="preview.previewFor"
+          v-model:page="page" v-model:per-page="perPage" :page-count="pageCount" :has-items="untracked.length > 0"
+          @toggle="(row) => toggle(row.key)" @label="onLabel">
+          <template #actions="{ row }">
+            <v-btn icon="mdi-plus-box" size="small" variant="text" color="primary" :loading="filesBusy === 'add'" aria-label="Add to Library" @click="addFiles([{ folder_identity: row.raw.folder_identity, relative_path: row.raw.relative_path }])" />
+            <v-btn icon="mdi-send" size="small" variant="text" color="primary" :loading="filesBusy === 'send'" aria-label="Send to Workspace" @click="sendFiles([{ folder_identity: row.raw.folder_identity, relative_path: row.raw.relative_path }])" />
           </template>
-        </v-list>
+        </CurationList>
         <v-empty-state v-else icon="mdi-check-all" title="No untracked files" text="Every local file already has a Library entry." />
+        <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="FILE_MENU_ITEMS" @select="(mode) => { fileAction(mode, fileMenu.row); fileMenu.open = false }" />
+        <InfoDialog v-model="fileInfo" />
       </v-window-item>
     </v-window>
   </v-card>

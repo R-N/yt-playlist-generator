@@ -24,9 +24,11 @@ export function prevIndex(idx) {
   return idx > 0 ? idx - 1 : 0
 }
 
-// YouTube IFrame embed URL for a candidate id.
+// YouTube IFrame embed URL for a candidate id. Uses the privacy-enhanced
+// nocookie host so browsers that block youtube.com third-party cookies/storage
+// still init the player (plain /embed shows "Video unavailable" under those).
 export function youtubeEmbed(id) {
-  return id ? `https://www.youtube.com/embed/${id}` : null
+  return id ? `https://www.youtube-nocookie.com/embed/${id}?rel=0` : null
 }
 
 // Vuetify color for an AcoustID/MusicBrainz cross-check confidence.
