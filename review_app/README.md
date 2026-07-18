@@ -5,7 +5,7 @@ items, downloads, local files, and curation.
 
 ## Navigation
 
-Primary navigation is **Import, Workspace, Library, Review, Settings**.
+Primary navigation is **Import, Workspace, Library, Review, Activity, Settings**.
 Pipeline, Playlist, and Discord are not primary screens. The old Local Files
 and Untracked screens are merged into Library.
 
@@ -21,8 +21,19 @@ and Untracked screens are merged into Library.
   filterable list. Exact handoff to Workspace, Verify links (YouTube health),
   Remove (drops the Library entry + downloaded file), and Review handoff.
 - **Review** curates exact local-file matches; curation remains SQLite-backed.
+- **Activity** is the log: **Background tasks** (verify sweeps — running with
+  progress + cancel, finished with a result; persisted in `background_tasks`,
+  running rows marked `interrupted` on restart) and **Decision history** (the
+  append-only `decisions` log, read-only).
 - **Settings** validates mp3 folders, sets the separate download folder,
   rescans the catalog, stores credentials, and runs failed-download cleanup.
+
+**Verify links** (Library + Workspace) is a paced background task, not a blocking
+loop — verifying thousands of links back-to-back would rate-limit. The button
+asks scope (**all** vs **only unverified**), then one worker thread (`tasks.py`)
+resolves yt-dlp health with a randomized delay, one verify at a time (a second
+request gets HTTP 409), cancellable, with a network-failure cutoff. Track it in
+Activity (`GET /api/tasks`); scope chooser is `VerifyScopeDialog.vue`.
 
 **Labels** are shared clickable icon badges (`labels.js` / `LabelRow.vue`) used
 by Workspace, Library, and Import: YouTube, Local file, Downloaded, Untracked,

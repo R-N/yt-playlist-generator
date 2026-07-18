@@ -4,18 +4,14 @@ import { api } from './api'
 import { reviewTrack, activeTab, invalidateData, libraryFocusIds, useTabRefresh } from './nav'
 import { deletionMessage, formatBytes } from './workspace'
 import { buildLabels, FILTER_ATTRS, matchesLabelFilter } from './labels'
-import { useLabelFilter, usePagination, useSelection, useRowActions, ytUrl, YT_MENU_ITEMS, STATUS_MENU_ITEMS, fileMenuItems } from './curation'
+import { useLabelFilter, usePagination, useSelection, useRowActions, ytUrl, YT_MENU_ITEMS, STATUS_MENU_ITEMS, UNTRACKED_MENU_ITEMS, fileMenuItems } from './curation'
 import CurationList from './CurationList.vue'
+import VerifyScopeDialog from './VerifyScopeDialog.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
 import ActionMenu from './ActionMenu.vue'
 import InfoDialog from './InfoDialog.vue'
 import TypedConfirmDialog from './TypedConfirmDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
-
-const UNTRACKED_MENU_ITEMS = [
-  { action: 'add', icon: 'mdi-plus-box', title: 'Add to Library' },
-  { action: 'send', icon: 'mdi-send', title: 'Send to Workspace' },
-]
 
 const rows = ref([])
 const savedLinks = ref([])
@@ -36,6 +32,7 @@ const audit = ref([])
 const deleteBusy = ref(false)
 const deleteOutcome = ref('')
 const verifying = ref(false)
+const verifyDialog = ref(false)
 const removeConfirm = ref(null)   // { ids, count } pending confirmation
 const removing = ref(false)
 const ytMenu = ref({ open: false, target: [0, 0], row: null })
@@ -144,16 +141,14 @@ async function load() {
   } catch (e) { error.value = String(e) }
   finally { loading.value = false }
 }
-// ids=null: verify all not-yet-checked; ids=array: force re-check those. Loops on remaining.
-async function verify(ids = null) {
+// Verify is a paced background task now (see Activity). scope: 'all' | 'unverified'.
+async function startVerify(scope) {
   verifying.value = true; error.value = ''
   try {
-    let res
-    do {
-      res = await api.libraryVerify(ids, 30)
-      rows.value = res.rows
-    } while (res.remaining > 0 && activeTab.value === 'library')
-  } catch (e) { error.value = String(e) }
+    await api.verifyLibraryTask(scope)
+    verifyDialog.value = false
+    activeTab.value = 'activity'
+  } catch (e) { error.value = e.message?.includes('409') ? 'A verify task is already running (see Activity).' : String(e) }
   finally { verifying.value = false }
 }
 function askRemove(ids) { if (ids.length) removeConfirm.value = { ids, count: ids.length } }
@@ -298,8 +293,11 @@ useTabRefresh('library', load)
   <v-toolbar density="comfortable" class="mb-3 px-2 rounded-lg" color="surface" border>
     <v-checkbox-btn :model-value="allVisible" density="compact" aria-label="Select all visible" @update:model-value="toggleAll" />
     <span class="text-caption text-medium-emphasis mr-1">{{ selected.length ? `${selected.length} selected` : `${filtered.length} shown` }}</span>
-    <v-btn icon variant="text" :loading="verifying" aria-label="Verify links" @click="verify(selectedTrackIds.length ? selectedTrackIds : null)">
-      <v-icon>mdi-refresh</v-icon><v-tooltip activator="parent" location="bottom">Verify links{{ selectedTrackIds.length ? ` (${selectedTrackIds.length})` : ' (all)' }}</v-tooltip>
+    <v-btn icon variant="text" :loading="loading" aria-label="Refresh" @click="load">
+      <v-icon>mdi-refresh</v-icon><v-tooltip activator="parent" location="bottom">Refresh list</v-tooltip>
+    </v-btn>
+    <v-btn icon variant="text" :loading="verifying" aria-label="Verify links" @click="verifyDialog = true">
+      <v-icon>mdi-link-variant</v-icon><v-tooltip activator="parent" location="bottom">Verify links (background task)</v-tooltip>
     </v-btn>
     <v-btn v-if="selectedTrackIds.length" icon color="primary" variant="text" aria-label="Send exact tracks to Workspace" @click="sendToWorkspace">
       <v-icon>mdi-send</v-icon><v-tooltip activator="parent" location="bottom">Send {{ selectedTrackIds.length }} exact tracks to Workspace</v-tooltip>
@@ -368,6 +366,7 @@ useTabRefresh('library', load)
   <ActionMenu v-model="statusMenu.open" :target="statusMenu.target" :items="STATUS_MENU_ITEMS" @select="(mode) => { statusAction(mode, statusMenu.row); statusMenu.open = false }" />
   <ActionMenu v-model="untrackedMenu.open" :target="untrackedMenu.target" :items="UNTRACKED_MENU_ITEMS" @select="untrackedAction" />
   <InfoDialog v-model="fileInfo" />
+  <VerifyScopeDialog v-model="verifyDialog" :busy="verifying" @pick="startVerify" />
   <ConfirmDialog :model-value="!!downloadDeleteConfirm" title="Delete downloaded file?" confirm-label="Delete" :max-width="440" @update:model-value="(v) => { if (!v) downloadDeleteConfirm = null }" @confirm="confirmDownloadDelete">
     Deletes the file in your download folder. The Library entry and any mp3-folder file stay.
   </ConfirmDialog>

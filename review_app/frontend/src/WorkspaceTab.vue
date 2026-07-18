@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from './api'
 import {
-  selectedItems, fileDownload, preferredRun, batchSnapshotIds, ACTIVE_RUN_STATUSES,
+  selectedItems, fileDownload, preferredRun, runDismissed, batchSnapshotIds, ACTIVE_RUN_STATUSES,
   duplicateMessage, skippedDuplicateCount,
   itemMeta, isDead, isEnriched, healthLabel, itemTitle, itemName, itemAuthor, formatViews, formatDuration, formatUploadDate,
   nameMatchScore,
@@ -13,6 +13,7 @@ import CurationList from './CurationList.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
 import ActionMenu from './ActionMenu.vue'
 import InfoDialog from './InfoDialog.vue'
+import VerifyScopeDialog from './VerifyScopeDialog.vue'
 
 // Workspace items can't be saved-links or untracked files — hide those attrs.
 const WS_FILTER_ATTRS = FILTER_ATTRS.filter((attr) => !['saved', 'untracked'].includes(attr.key))
@@ -25,6 +26,8 @@ const dialog = ref(false)
 const loading = ref(false)
 const working = ref('')
 const verifying = ref(false)
+const verifyDialog = ref(false)
+const startingVerify = ref(false)
 const error = ref('')
 const run = ref(null)
 const batchIds = ref([])
@@ -84,13 +87,21 @@ const listRows = computed(() => pagedItems.value.map((item) => ({
     : { title: 'File info', lines: [['File', item.track_filename || '—'], ['Artist', item.track_artist || '—'], ['Title', item.track_title || '—'], ['Local files', String(item.local_count || 0)]] },
 })))
 
+// Which finished run the user dismissed, so it doesn't resurface every reload.
+// Active runs always show; only a done/failed one can be dismissed.
+const DISMISS_KEY = 'ws-dismissed-run'
+function dismissRun() {
+  if (run.value?.id != null) localStorage.setItem(DISMISS_KEY, String(run.value.id))
+  run.value = null
+}
 async function load() {
   loading.value = true
   try {
     items.value = (await api.workspace()).items
     const runs = (await api.workspaceRuns()).runs
     const durableRun = preferredRun(runs)
-    run.value = durableRun ? await api.workspaceRun(durableRun.id) : null
+    const dismissed = runDismissed(durableRun, localStorage.getItem(DISMISS_KEY))
+    run.value = durableRun && !dismissed ? await api.workspaceRun(durableRun.id) : null
     maybeVerify()
   }
   catch (e) { error.value = String(e) }
@@ -123,6 +134,17 @@ async function verify(ids) {
     }
   } catch (e) { error.value = String(e) }
   finally { verifying.value = false }
+}
+
+// Manual verify = paced background task (see Activity). scope: 'all' | 'unverified'.
+async function startVerify(scope) {
+  startingVerify.value = true; error.value = ''
+  try {
+    await api.verifyWorkspaceTask(scope)
+    verifyDialog.value = false
+    activeTab.value = 'activity'
+  } catch (e) { error.value = e.message?.includes('409') ? 'A verify task is already running (see Activity).' : String(e) }
+  finally { startingVerify.value = false }
 }
 
 async function removeItems(ids) {
@@ -250,7 +272,7 @@ onUnmounted(() => clearInterval(poll))
   </div>
 
   <v-alert v-if="run" variant="tonal" :type="run.status === 'done' ? 'success' : run.status === 'failed' ? 'error' : 'info'" class="mb-4" role="status"
-    :closable="run.status === 'done' || run.status === 'failed'" @click:close="run = null">
+    :closable="run.status === 'done' || run.status === 'failed'" @click:close="dismissRun">
     Audio download: <strong>{{ run.status }}</strong>. {{ run.error_text || `${run.items?.length || 0} snapshotted items` }}
   </v-alert>
   <v-alert v-if="batchDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Playlist', batchDuplicates) }}</v-alert>
@@ -260,11 +282,17 @@ onUnmounted(() => clearInterval(poll))
 
   <v-toolbar density="comfortable" class="mb-3 px-2 rounded-lg" color="surface" border>
     <v-checkbox-btn :model-value="allSelected" aria-label="Select all live items" @update:model-value="toggleAll" />
+    <v-btn icon variant="text" :loading="loading" aria-label="Refresh" @click="load">
+      <v-icon>mdi-refresh</v-icon><v-tooltip activator="parent" location="bottom">Refresh list</v-tooltip>
+    </v-btn>
+    <v-btn icon variant="text" :loading="startingVerify" aria-label="Verify links" @click="verifyDialog = true">
+      <v-icon>mdi-link-variant</v-icon><v-tooltip activator="parent" location="bottom">Verify links (background task)</v-tooltip>
+    </v-btn>
     <v-btn icon variant="text" :loading="finding === 'local'" :disabled="busy" aria-label="Find local file" @click="findLocal">
       <v-icon>mdi-folder-search-outline</v-icon><v-tooltip activator="parent" location="bottom">Find local file</v-tooltip>
     </v-btn>
     <v-btn icon variant="text" :disabled="busy" aria-label="Find YouTube link" @click="findYoutube">
-      <v-icon>mdi-link-variant-plus</v-icon><v-tooltip activator="parent" location="bottom">Find YouTube link (dead)</v-tooltip>
+      <v-icon>mdi-link-variant-plus</v-icon><v-tooltip activator="parent" location="bottom">Find YouTube link (missing/dead)</v-tooltip>
     </v-btn>
     <v-btn icon variant="text" :disabled="busy" aria-label="Generate Playlist" @click="generatePlaylist">
       <v-icon>mdi-playlist-play</v-icon><v-tooltip activator="parent" location="bottom">Generate Playlist</v-tooltip>
@@ -319,12 +347,7 @@ onUnmounted(() => clearInterval(poll))
           <v-btn icon="mdi-dots-vertical" size="small" variant="text" aria-label="Item actions" v-bind="props" />
         </template>
         <v-list density="compact" min-width="180">
-          <template v-if="row.raw.youtube_url && !row.dead">
-            <v-list-item prepend-icon="mdi-open-in-new" title="Open in new tab" :href="row.raw.youtube_url" target="_blank" rel="noopener noreferrer" />
-            <v-list-item prepend-icon="mdi-content-copy" title="Copy link" @click="copy(row.raw.youtube_url)" />
-            <v-list-item prepend-icon="mdi-bookmark-plus-outline" title="Save to Library" @click="saveToLibrary([row.key])" />
-          </template>
-          <v-list-item v-if="!row.raw.youtube_url || row.dead" prepend-icon="mdi-magnify" title="Find YouTube link" :href="ytSearchUrl(row.raw)" target="_blank" rel="noopener noreferrer" />
+          <v-list-item prepend-icon="mdi-bookmark-plus-outline" title="Save to Library" @click="saveToLibrary([row.key])" />
           <v-list-item v-if="row.raw.track_id" prepend-icon="mdi-library" title="Show in library" @click="showInLibrary([row.raw.track_id])" />
           <v-list-item prepend-icon="mdi-delete-outline" title="Remove" base-color="error" @click="removeItems([row.key])" />
         </v-list>
@@ -339,6 +362,7 @@ onUnmounted(() => clearInterval(poll))
   <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="FILE_MENU_ITEMS" @select="(mode) => { fileAction(mode, fileMenu.row); fileMenu.open = false }" />
   <ActionMenu v-model="statusMenu.open" :target="statusMenu.target" :items="STATUS_MENU_ITEMS" @select="(mode) => { statusAction(mode, statusMenu.row); statusMenu.open = false }" />
   <InfoDialog v-model="fileInfo" />
+  <VerifyScopeDialog v-model="verifyDialog" :busy="startingVerify" @pick="startVerify" />
 
   <v-dialog v-model="findLocalOpen" max-width="720" scrollable>
     <v-card>

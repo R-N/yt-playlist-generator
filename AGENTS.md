@@ -43,9 +43,9 @@ Retain root commands for compatibility. They are not app primary contract.
 
 ## Workspace-first app
 
-Primary navigation is exactly: **Import, Workspace, Library, Review, Settings**.
-There are no primary Pipeline, Playlist, or Discord screens. The former Local
-Files and Untracked screens are folded into Library.
+Primary navigation is exactly: **Import, Workspace, Library, Review, Activity,
+Settings**. There are no primary Pipeline, Playlist, or Discord screens. The
+former Local Files and Untracked screens are folded into Library.
 
 - **Import** owns pasted YouTube, Discord, and an **Untracked files** tab
   (configured-folder files with no Library entry): preview, Add to Library,
@@ -56,11 +56,26 @@ Files and Untracked screens are folded into Library.
   (nullable FK), OR a local file directly (`folder_identity` + `relative_path`).
   At least one identity is required (table CHECK). File-only and link-less items
   are excluded from YouTube-only operations (playlist/export/download/enrich).
+  The row 3-dots menu is exactly Save to Library / Show in library / Remove, with
+  Show in library hidden for file-only items (no `track_id`). A dismissed
+  finished download-run alert is remembered in localStorage so it stops
+  resurfacing on reload; active runs always show.
 - **Library** merges tracks, Saved Links, and untracked local files into one
-  filterable list (tri-state, Tachiyomi-style label filter). Exact handoff to
-  Workspace; **Verify links** health-checks YouTube ids into `tracks.yt_health`;
-  **Remove** deletes the Library entry and its downloaded file (never the
-  mp3-folder file). Saved Links reach Review only after exact local-file match.
+  filterable list (tri-state, Tachiyomi-style label filter incl. `untracked`).
+  Exact handoff to Workspace; **Verify links** (see below); **Remove** deletes
+  the Library entry and its downloaded file (never the mp3-folder file). Saved
+  Links reach Review only after exact local-file match.
+- **Verify links** (Library + Workspace toolbars) runs as a paced background
+  task — verifying 7k+ links back-to-back would rate-limit. The button asks
+  scope (**all** vs **only unverified**), then `tasks.run` starts ONE worker
+  thread that resolves yt-dlp health with a randomized delay, one verify at a
+  time (409 if another is active), cancellable, with a consecutive-network-fail
+  cutoff. Persists `tracks.yt_health` / workspace `metadata_json`. The old capped
+  `/api/library/verify` + `/api/workspace/enrich` loops remain (on-load enrich).
+- **Activity** is the log: **Background tasks** (`background_tasks` table; running
+  → progress + cancel, finished → result; running rows become `interrupted` on
+  restart) and **Decision history** (`decisions`, append-only, read-only). Scope
+  chooser is `VerifyScopeDialog.vue`; the list polls `GET /api/tasks`.
 - **Review** curates exact matches; curation stays SQLite-backed.
 - **Settings** owns validated mp3-folder config/rescan, the separate **download
   folder**, credentials, and failed-download cleanup.

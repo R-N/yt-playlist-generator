@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 import db
 import jobs
+import tasks
 import settings
 import discord_service
 from config import MP3_FOLDERS, AUTO_EXPORT_EVERY, REPO_ROOT
@@ -822,6 +823,78 @@ def api_library_verify(req: LibraryVerify):
         db.set_track_health(r["id"], _resolve_yt_metadata(r["yt_id"]).get("health", "unknown"))
     return {"rows": api_library()["rows"], "checked": [r["id"] for r in targets[:cap]],
             "remaining": max(0, len(targets) - cap)}
+
+
+# ── background verify tasks + Activity log ──────────────────────────────────
+class VerifyScope(BaseModel):
+    scope: str = "unverified"          # "all" | "unverified"
+
+
+def _resolve_health(yt_id):
+    """Resolve one link's health; NetworkDown on 'unknown' so the worker's
+    consecutive-failure cutoff can trip when the network/yt-dlp is down."""
+    health = _resolve_yt_metadata(yt_id).get("health", "unknown")
+    if health == "unknown":
+        raise tasks.NetworkDown()
+    return health
+
+
+@app.post("/api/tasks/verify/library")
+def api_task_verify_library(req: VerifyScope):
+    rows, _ = db.get_rows(status="all", limit=1_000_000, offset=0)
+    linked = [r for r in rows if r.get("yt_id")]
+    targets = linked if req.scope == "all" else [r for r in linked if not r.get("yt_health")]
+    yt = {r["id"]: r["yt_id"] for r in targets}
+
+    def do_one(track_id):
+        try:
+            health = _resolve_health(yt[track_id])
+        except tasks.NetworkDown:
+            db.set_track_health(track_id, "unknown")
+            raise
+        db.set_track_health(track_id, health)
+        return health in ("dead", "private")
+
+    try:
+        return tasks.run("library-verify", "Verify library links", list(yt), do_one)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/api/tasks/verify/workspace")
+def api_task_verify_workspace(req: VerifyScope):
+    items = [it for it in db.list_workspace() if it.get("youtube_id")]
+    targets = items if req.scope == "all" else [
+        it for it in items if _item_metadata(it).get("health") in (None, "unknown")]
+    yt = {it["id"]: it["youtube_id"] for it in targets}
+
+    def do_one(item_id):
+        meta = _resolve_yt_metadata(yt[item_id])
+        db.set_workspace_metadata(item_id, meta)
+        if meta.get("health", "unknown") == "unknown":
+            raise tasks.NetworkDown()
+        return meta.get("health") in ("dead", "private")
+
+    try:
+        return tasks.run("workspace-verify", "Verify workspace links", list(yt), do_one)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.get("/api/tasks")
+def api_tasks():
+    return {"tasks": tasks.snapshot()}
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def api_task_cancel(task_id: int):
+    return {"ok": tasks.request_cancel(task_id)}
+
+
+@app.get("/api/history")
+def api_history(limit: int = 200):
+    """The append-only approve/reject decision log (Activity › History)."""
+    return {"decisions": db.list_decisions(limit)}
 
 
 def _delete_downloads_for_ids(ids):

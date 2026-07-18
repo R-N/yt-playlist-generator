@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { chunkItems, selectedItems, formatBytes, activeRun, preferredRun, batchSnapshotIds, folderLines, deletionMessage, duplicateMessage, skippedDuplicateCount,
+import { chunkItems, selectedItems, formatBytes, activeRun, preferredRun, runDismissed, batchSnapshotIds, folderLines, deletionMessage, duplicateMessage, skippedDuplicateCount,
   itemMeta, isDead, isEnriched, itemTitle, healthLabel, formatViews, formatDuration, formatUploadDate,
   nameMatchScore } from './workspace'
 
@@ -33,6 +33,14 @@ describe('workspace helpers', () => {
     expect(activeRun([{ id: 1, status: 'failed' }])).toBeNull()
     expect(preferredRun([{ id: 1, status: 'done' }]).id).toBe(1)
     expect(batchSnapshotIds([{ item_ids: [4, 5] }, { item_ids: [9] }])).toEqual([4, 5, 9])
+  })
+
+  it('hides only the dismissed finished run, never an active one', () => {
+    expect(runDismissed({ id: 7, status: 'done' }, '7')).toBe(true)
+    expect(runDismissed({ id: 7, status: 'failed' }, 7)).toBe(true)   // id coerced
+    expect(runDismissed({ id: 7, status: 'done' }, '9')).toBe(false)  // a newer run
+    expect(runDismissed({ id: 7, status: 'running' }, '7')).toBe(false) // active always shows
+    expect(runDismissed(null, '7')).toBe(false)
   })
 
   it('allows explicit empty folder input and reports partial deletion', () => {

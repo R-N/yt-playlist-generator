@@ -74,6 +74,13 @@ export const api = {
   workspaceRun: (id) => jget(`/api/workspace/runs/${id}`),
   workspaceRuns: () => jget('/api/workspace/runs'),
 
+  // background tasks (verify sweeps) + Activity log
+  tasks: () => jget('/api/tasks'),
+  taskCancel: (id) => jpost(`/api/tasks/${id}/cancel`),
+  verifyLibraryTask: (scope) => jpost('/api/tasks/verify/library', { scope }),
+  verifyWorkspaceTask: (scope) => jpost('/api/tasks/verify/workspace', { scope }),
+  history: (limit = 200) => jget(`/api/history?limit=${limit}`),
+
   // pipeline scripts (background jobs)
   scripts: () => jget('/api/scripts'),
   scriptState: (name, tail) =>

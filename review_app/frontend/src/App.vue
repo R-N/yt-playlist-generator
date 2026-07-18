@@ -3,6 +3,7 @@ import WorkspaceTab from './WorkspaceTab.vue'
 import ImportTab from './ImportTab.vue'
 import ReviewTab from './ReviewTab.vue'
 import LibraryTab from './LibraryTab.vue'
+import ActivityTab from './ActivityTab.vue'
 import SettingsTab from './SettingsTab.vue'
 import { activeTab as tab, PRIMARY_NAV } from './nav'
 import { ref } from 'vue'
@@ -41,6 +42,7 @@ function go(value) { tab.value = value; if (mobile.value) drawer.value = false }
         <v-window-item value="workspace" :eager="true"><v-container class="tab-wrap" fluid><WorkspaceTab /></v-container></v-window-item>
         <v-window-item value="library" :eager="true"><v-container class="tab-wrap" fluid><LibraryTab /></v-container></v-window-item>
         <v-window-item value="review" :eager="true"><v-container class="tab-wrap" fluid><ReviewTab /></v-container></v-window-item>
+        <v-window-item value="activity"><v-container class="tab-wrap" fluid><ActivityTab /></v-container></v-window-item>
         <v-window-item value="settings"><v-container class="tab-wrap" fluid><SettingsTab /></v-container></v-window-item>
       </v-window>
     </v-main>

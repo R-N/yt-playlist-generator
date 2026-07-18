@@ -95,12 +95,31 @@ def init_db():
             detail TEXT,
             ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
+        # Background task log (verify sweeps etc.). Runtime state, not exported.
+        conn.execute("""CREATE TABLE IF NOT EXISTS background_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,          -- running | done | error | cancelled | interrupted
+            total INTEGER NOT NULL DEFAULT 0,
+            done INTEGER NOT NULL DEFAULT 0,
+            found INTEGER NOT NULL DEFAULT 0,
+            message TEXT,
+            started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at TEXT
+        )""")
         conn.commit()
 
         conn.execute(
             "UPDATE workspace_runs SET status='interrupted', "
             "error_text=COALESCE(error_text, 'app restarted before run completed') "
             "WHERE status IN ('queued','running','finalizing')"
+        )
+        # A running task's worker thread died with the old process — mark it so.
+        conn.execute(
+            "UPDATE background_tasks SET status='interrupted', "
+            "message=COALESCE(message, 'app restarted before task completed'), "
+            "finished_at=CURRENT_TIMESTAMP WHERE status IN ('running','cancelling')"
         )
         conn.commit()
         empty = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0] == 0
@@ -828,6 +847,73 @@ def list_workspace_runs():
         return [dict(row) for row in conn.execute(
             "SELECT * FROM workspace_runs ORDER BY id DESC"
         )]
+    finally:
+        conn.close()
+
+
+# ── background task log (verify sweeps) ─────────────────────────────────────
+def create_task(kind, title, total):
+    conn = connect()
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO background_tasks (kind, title, status, total) "
+                "VALUES (?,?, 'running', ?)", (kind, title, total))
+            return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def bump_task(task_id, done=0, found=0):
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("UPDATE background_tasks SET done=done+?, found=found+? "
+                         "WHERE id=?", (done, found, task_id))
+    finally:
+        conn.close()
+
+
+def finish_task(task_id, status, message=""):
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("UPDATE background_tasks SET status=?, message=?, "
+                         "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                         (status, message, task_id))
+    finally:
+        conn.close()
+
+
+def get_task(task_id):
+    conn = connect()
+    try:
+        row = conn.execute("SELECT * FROM background_tasks WHERE id=?", (task_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_tasks(limit=100):
+    """Task log: running first, then most-recent finished."""
+    conn = connect()
+    try:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM background_tasks "
+            "ORDER BY (status='running') DESC, id DESC LIMIT ?", (limit,))]
+    finally:
+        conn.close()
+
+
+def list_decisions(limit=200):
+    """The append-only approve/reject log, newest first, with each track's title."""
+    conn = connect()
+    try:
+        return [dict(row) for row in conn.execute(
+            "SELECT d.id, d.track_id, d.filename, d.yt_id, d.decision, d.ts, "
+            "       t.title, t.artist, t.yt_title "
+            "FROM decisions d LEFT JOIN tracks t ON t.id = d.track_id "
+            "ORDER BY d.id DESC LIMIT ?", (limit,))]
     finally:
         conn.close()
 

@@ -73,6 +73,12 @@ export const STATUS_MENU_ITEMS = [
   { action: 'rereview', icon: 'mdi-eye-refresh-outline', title: 'Re-review' },
 ]
 
+// Untracked-file label menu, shared by Library and Import (untracked tab).
+export const UNTRACKED_MENU_ITEMS = [
+  { action: 'add', icon: 'mdi-plus-box', title: 'Add to Library' },
+  { action: 'send', icon: 'mdi-send', title: 'Send to Workspace' },
+]
+
 export function fileMenuItems({ deletable = false, source = 'local' } = {}) {
   const items = [
     { action: 'play', icon: 'mdi-play', title: 'Play audio' },

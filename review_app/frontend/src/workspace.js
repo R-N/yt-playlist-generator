@@ -50,6 +50,13 @@ export function preferredRun(runs) {
   return activeRun(list) || list[0] || null
 }
 
+// A finished run the user dismissed shouldn't resurface on reload. Active runs
+// (queued/running/finalizing) always show; only a done/failed one is dismissable.
+export function runDismissed(run, dismissedId) {
+  if (!run || ACTIVE_RUN_STATUSES.includes(run.status)) return false
+  return String(run.id) === String(dismissedId)
+}
+
 export function batchSnapshotIds(batches) {
   return (Array.isArray(batches) ? batches : []).flatMap((batch) => batch.item_ids || [])
 }

@@ -33,9 +33,9 @@ python run.py --dev
 
 ## Current app contract
 
-Primary nav: **Import, Workspace, Library, Review, Settings**. Pipeline,
-Playlist, and Discord are not primary screens. Local Files + Untracked were
-merged into Library.
+Primary nav: **Import, Workspace, Library, Review, Activity, Settings**.
+Pipeline, Playlist, and Discord are not primary screens. Local Files + Untracked
+were merged into Library.
 
 - Import owns pasted YouTube, Discord, and an **Untracked files** tab (files in
   configured folders with no Library entry): preview, Add to Library, Send to
@@ -45,11 +45,26 @@ merged into Library.
   `relative_path`) — so a link-less local file stages with no Library row. At
   least one identity required (CHECK). Persists exact selection/order, 50-item
   batches, exports, isolated downloads. YouTube-only ops (playlist/export/
-  download/enrich) skip file-only + link-less items.
+  download/enrich) skip file-only + link-less items. Row 3-dots menu is exactly
+  Save to Library / Show in library / Remove; Show in library is hidden for
+  file-only items (no `track_id`). A dismissed finished download-run alert is
+  remembered (localStorage) so it doesn't resurface on reload; active runs
+  always show.
 - Library merges tracks, Saved Links, and untracked local files in one list.
-  Exact handoff to Workspace; Review curation; **Verify links** (yt-dlp health
-  → `tracks.yt_health`); **Remove** (deletes the Library entry + its downloaded
-  file, never the mp3-folder file). Tri-state (Tachiyomi-style) label filter.
+  Exact handoff to Workspace; Review curation; **Verify links**; **Remove**
+  (deletes the Library entry + its downloaded file, never the mp3-folder file).
+  Tri-state (Tachiyomi-style) label filter, `untracked` included.
+- **Verify links** (Library + Workspace) is a paced background task, not a
+  blocking loop: 7k+ links would rate-limit. The button asks scope — **all** or
+  **only unverified** (fewer = faster) — then starts one worker thread
+  (`tasks.py`) that resolves yt-dlp health with a randomized delay, one verify
+  at a time (global rate limit), cancellable, with a network-fail cutoff. Writes
+  `tracks.yt_health` / workspace `metadata_json`. Workspace's on-load enrich
+  (`/api/workspace/enrich`) stays a separate capped foreground loop.
+- **Activity** shows the log: **Background tasks** (running with progress +
+  cancel, finished with result; persisted in `background_tasks`, orphaned-running
+  → `interrupted` on restart) and **Decision history** (the append-only
+  `decisions` log, read-only). `VerifyScopeDialog.vue` is the shared scope chooser.
 - **Labels** (`labels.js` + `LabelRow.vue`, shared by Workspace, Library, and
   Import) are clickable icon badges: YouTube, Local file, Downloaded, Untracked,
   Confirmed, Rejected. Each opens a context menu (open/copy/play/reveal/delete).

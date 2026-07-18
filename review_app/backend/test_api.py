@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 import db
 import main
 import jobs
+import tasks
 import settings
 
 
@@ -972,6 +973,68 @@ class WorkspaceEnrichTest(ApiTestBase):
             main._resolve_yt_metadata = orig
         self.assertEqual(len(resp["checked"]), 1)
         self.assertEqual(resp["remaining"], 2)
+
+
+class BackgroundVerifyTest(ApiTestBase):
+    """The Verify buttons start a paced background task; the network resolver and
+    the delay are stubbed so it runs instantly and hits no yt-dlp."""
+
+    def setUp(self):
+        super().setUp()
+        self._delay = tasks.DELAY
+        tasks.DELAY = (0, 0)
+        tasks._active = None
+        tasks._cancel.clear()
+        tasks._threads.clear()
+
+    def tearDown(self):
+        for t in list(tasks._threads.values()):
+            t.join(timeout=2)
+        tasks.DELAY = self._delay
+        super().tearDown()
+
+    def _join(self, task_id):
+        tasks._threads[task_id].join(timeout=3)
+
+    def test_workspace_verify_task_runs_and_flags_dead(self):
+        self.client.post("/api/workspace/import", json={"text": "first123456\nsecond12345"})
+        fake = {"first123456": {"health": "ok"}, "second12345": {"health": "dead"}}
+        orig = main._resolve_yt_metadata
+        main._resolve_yt_metadata = lambda yid: fake[yid]
+        try:
+            task = self.client.post("/api/tasks/verify/workspace", json={"scope": "all"}).json()
+            self._join(task["id"])
+        finally:
+            main._resolve_yt_metadata = orig
+        done = self.client.get("/api/tasks").json()["tasks"][0]
+        self.assertEqual(done["status"], "done")
+        self.assertEqual((done["done"], done["found"]), (2, 1))   # 2 checked, 1 dead
+
+    def test_second_verify_returns_409_while_running(self):
+        self.client.post("/api/workspace/import", json={"text": "first123456"})
+        orig = main._resolve_yt_metadata
+        # Hold one task 'running' by parking the resolver on the first call.
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        def parked(yid):
+            entered.set(); release.wait(2); return {"health": "ok"}
+        main._resolve_yt_metadata = parked
+        try:
+            first = self.client.post("/api/tasks/verify/workspace", json={"scope": "all"}).json()
+            entered.wait(2)
+            resp = self.client.post("/api/tasks/verify/workspace", json={"scope": "all"})
+            self.assertEqual(resp.status_code, 409)
+            release.set()
+            self._join(first["id"])
+        finally:
+            main._resolve_yt_metadata = orig
+
+    def test_history_lists_decisions(self):
+        rows = self.client.get("/api/rows?status=all&limit=5").json()["rows"]
+        self.client.post("/api/decision", json={"track_id": rows[0]["id"], "decision": 1})
+        hist = self.client.get("/api/history").json()["decisions"]
+        self.assertEqual(hist[0]["decision"], 1)
+        self.assertEqual(hist[0]["track_id"], rows[0]["id"])
 
 
 class ClassifyYtErrorTest(unittest.TestCase):

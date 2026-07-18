@@ -23,8 +23,8 @@ Open the app by **hostname** (`localhost`), not a bare IP (`127.0.0.1`):
 YouTube's embedded player rejects an IP-origin referer and shows "Video
 unavailable". `run.py` defaults `--host` to `localhost` for this reason.
 
-Primary navigation: **Import, Workspace, Library, Review, Settings**. The former
-Local Files and Untracked screens are folded into Library.
+Primary navigation: **Import, Workspace, Library, Review, Activity, Settings**.
+The former Local Files and Untracked screens are folded into Library.
 
 - **Import** handles pasted YouTube links/IDs, Discord imports, and an
   **Untracked files** tab (configured-folder files with no Library entry):
@@ -37,8 +37,17 @@ Local Files and Untracked screens are folded into Library.
   and Remove (drops the entry + downloaded file). Saved Links require exact
   local-file matching before Review.
 - **Review** curates exact local-file matches.
+- **Activity** logs background tasks (verify sweeps — running with progress and
+  a cancel, or finished with a result) and the append-only approve/reject
+  decision history.
 - **Settings** validates mp3 folders, sets the separate download folder,
   rescans the catalog, stores credentials, and owns failed-download cleanup.
+
+**Verify links** (Library and Workspace) runs as a background task: checking
+thousands of YouTube links back-to-back would get rate-limited, so it paces
+itself with a randomized delay and is cancellable. The button asks whether to
+verify **all** links or **only unverified** ones (fewer = faster); watch it under
+Activity.
 
 Shared clickable **labels** (YouTube, Local file, Downloaded, Untracked,
 Confirmed, Rejected) appear in Workspace and Library. A **download**

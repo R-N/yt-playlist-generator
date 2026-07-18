@@ -7,6 +7,7 @@ export const PRIMARY_NAV = [
   { value: 'workspace', icon: 'mdi-youtube', label: 'Workspace', subtitle: 'YouTube list + batches' },
   { value: 'library', icon: 'mdi-music-box-multiple', label: 'Library', subtitle: 'tracks + saved links' },
   { value: 'review', icon: 'mdi-check-decagram', label: 'Review', subtitle: 'approve / reject by ear' },
+  { value: 'activity', icon: 'mdi-history', label: 'Activity', subtitle: 'tasks + history' },
   { value: 'settings', icon: 'mdi-tune', label: 'Settings', subtitle: 'folders + maintenance' },
 ]
 
