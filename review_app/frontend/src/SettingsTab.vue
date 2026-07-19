@@ -11,6 +11,8 @@ const folders = ref([])
 const picking = ref(false)
 const downloadFolder = ref('')
 const pickingDownload = ref(false)
+const linkFinding = ref({ YT_SEARCH_TOP_N: '', TASK_DELAY_MIN: '', TASK_DELAY_MAX: '', YT_MIN_SCORE: '', LOCAL_MIN_SCORE: '', SEARCH_RESULT_LIMIT: '' })
+const advanced = ref({ DELETE_TOKEN_TTL: '', CLEANUP_EXTENSIONS: '' })
 const saving = ref(false)
 const saved = ref(false)
 const error = ref('')
@@ -34,6 +36,8 @@ async function load() {
     form.value.DISCORD_CHANNEL_ID = state.value.DISCORD_CHANNEL_ID?.preview || ''
     try { const list = JSON.parse(state.value.MP3_FOLDERS_JSON?.preview || '[]'); folders.value = Array.isArray(list) ? list : [] } catch { folders.value = [] }
     downloadFolder.value = state.value.DOWNLOAD_FOLDER?.preview || ''
+    for (const k of Object.keys(linkFinding.value)) linkFinding.value[k] = state.value[k]?.preview || ''
+    for (const k of Object.keys(advanced.value)) advanced.value[k] = state.value[k]?.preview || ''
     scripts.value = await api.scripts()
     await Promise.all(scripts.value.map(async (script) => { scriptStates.value[script.name] = await api.scriptState(script.name, 80) }))
   } catch (e) { error.value = String(e) }
@@ -43,6 +47,18 @@ async function save() {
   const body = {}
   for (const [key, value] of Object.entries(form.value)) if (value !== '') body[key] = value
   try { state.value = await api.saveSettings(body); form.value.DISCORD_BOT_TOKEN = ''; form.value.ACOUSTID_API_KEY = ''; saved.value = true }
+  catch (e) { error.value = String(e) }
+  finally { saving.value = false }
+}
+async function saveLinkFinding() {
+  saving.value = true; error.value = ''; saved.value = false
+  try { state.value = await api.saveSettings({ ...linkFinding.value }); saved.value = true }
+  catch (e) { error.value = String(e) }
+  finally { saving.value = false }
+}
+async function saveAdvanced() {
+  saving.value = true; error.value = ''; saved.value = false
+  try { state.value = await api.saveSettings({ ...advanced.value }); saved.value = true }
   catch (e) { error.value = String(e) }
   finally { saving.value = false }
 }
@@ -144,6 +160,30 @@ useTabRefresh('settings', load)
         <v-text-field v-model="downloadFolder" density="compact" variant="outlined" hide-details prepend-inner-icon="mdi-folder-download-outline" placeholder="E:\\Music\\downloads" />
         <v-btn variant="tonal" :loading="pickingDownload" prepend-icon="mdi-folder-plus-outline" @click="pickDownloadFolder">Pick</v-btn>
         <v-btn color="primary" :loading="saving" @click="saveDownloadFolder">Save</v-btn>
+      </div>
+    </v-card>
+
+    <v-card variant="outlined" class="pa-4 mb-5">
+      <div class="text-subtitle-1 mb-1">Link finding</div>
+      <div class="text-caption text-medium-emphasis mb-3">Auto find-YouTube / find-local tasks. Top-N = how many search hits to score before picking the best. Delay paces network fetches (seconds, randomized between min and max) to dodge rate limits. Min scores are the lowest match score an auto-find will accept and apply — lower accepts weaker matches (YouTube score may be negative; local is a 0–100 filename ratio).</div>
+      <div class="d-flex align-center ga-2 flex-wrap">
+        <v-text-field v-model="linkFinding.YT_SEARCH_TOP_N" type="number" min="1" max="10" density="compact" variant="outlined" hide-details label="Search top-N" placeholder="3" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.TASK_DELAY_MIN" type="number" min="0" step="0.5" density="compact" variant="outlined" hide-details label="Delay min (s)" placeholder="1.5" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.TASK_DELAY_MAX" type="number" min="0" step="0.5" density="compact" variant="outlined" hide-details label="Delay max (s)" placeholder="4" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.YT_MIN_SCORE" type="number" density="compact" variant="outlined" hide-details label="YouTube min score" placeholder="0" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.LOCAL_MIN_SCORE" type="number" min="0" max="100" density="compact" variant="outlined" hide-details label="Local min score" placeholder="60" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.SEARCH_RESULT_LIMIT" type="number" min="1" max="50" density="compact" variant="outlined" hide-details label="Picker results" placeholder="10" style="min-width:120px" />
+        <v-btn color="primary" :loading="saving" @click="saveLinkFinding">Save</v-btn>
+      </div>
+    </v-card>
+
+    <v-card variant="outlined" class="pa-4 mb-5">
+      <div class="text-subtitle-1 mb-1">Advanced</div>
+      <div class="text-caption text-medium-emphasis mb-3">Delete-token TTL = seconds a delete confirmation stays valid before you must re-preview (min 5). Cleanup extensions = which file suffixes the download cleanup treats as junk (comma-separated; zero-byte files are always swept).</div>
+      <div class="d-flex align-center ga-2 flex-wrap">
+        <v-text-field v-model="advanced.DELETE_TOKEN_TTL" type="number" min="5" density="compact" variant="outlined" hide-details label="Delete-token TTL (s)" placeholder="60" style="min-width:160px" />
+        <v-text-field v-model="advanced.CLEANUP_EXTENSIONS" density="compact" variant="outlined" hide-details label="Cleanup extensions" placeholder=".mp4, .webm, .m4a, .part …" style="min-width:280px" />
+        <v-btn color="primary" :loading="saving" @click="saveAdvanced">Save</v-btn>
       </div>
     </v-card>
 

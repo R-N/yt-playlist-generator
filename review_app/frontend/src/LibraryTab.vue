@@ -4,11 +4,14 @@ import { api } from './api'
 import { reviewTrack, activeTab, invalidateData, libraryFocusIds, useTabRefresh } from './nav'
 import { deletionMessage, formatBytes } from './workspace'
 import { buildLabels, FILTER_ATTRS, matchesLabelFilter } from './labels'
-import { useLabelFilter, usePagination, useSelection, useRowActions, ytUrl, YT_MENU_ITEMS, STATUS_MENU_ITEMS, UNTRACKED_MENU_ITEMS, fileMenuItems } from './curation'
+import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, untrackedMenuItems, libraryLabelMenu, workspaceLabelMenu, fileMenuItems, downloadMenuItems } from './curation'
 import CurationList from './CurationList.vue'
 import VerifyScopeDialog from './VerifyScopeDialog.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
 import ActionMenu from './ActionMenu.vue'
+import SearchPickerDialog from './SearchPickerDialog.vue'
+import ForceSetDialog from './ForceSetDialog.vue'
+import InfoEditDialog from './InfoEditDialog.vue'
 import InfoDialog from './InfoDialog.vue'
 import TypedConfirmDialog from './TypedConfirmDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -16,6 +19,7 @@ import ConfirmDialog from './ConfirmDialog.vue'
 const rows = ref([])
 const savedLinks = ref([])
 const localFiles = ref([])
+const wsItems = ref([])   // workspace items, for cross-membership labels + untracked exclusion
 const { labelFilter, activeFilterCount, cycleFilter } = useLabelFilter()
 const query = ref('')
 const sortBy = ref(null)   // { key, order }
@@ -40,13 +44,47 @@ const fileMenu = ref({ open: false, target: [0, 0], row: null, source: 'local' }
 const downloadDeleteConfirm = ref(null)
 const statusMenu = ref({ open: false, target: [0, 0], row: null })
 const untrackedMenu = ref({ open: false, target: [0, 0], row: null })
+const ytMenuState = ref({ items: YT_MENU_ITEMS })
+const memberMenu = ref({ open: false, target: [0, 0], label: null, items: [] })
+// track_id -> workspace item id (present = staged in Workspace); file refs staged in WS.
+const wsByTrack = computed(() => new Map(wsItems.value.filter((it) => it.track_id).map((it) => [it.track_id, it.id])))
+const wsFileRefs = computed(() => new Set(wsItems.value.filter((it) => it.relative_path).map((it) => `${it.folder_identity}|${it.relative_path}`)))
 // Shared action logic (curation.js). Rows carry the entity data; deleteFile is
 // injected because Library's approved/download delete flows are screen-specific.
 const { preview, fileInfo, ytAction, fileAction, statusAction } = useRowActions({
   onError: (e) => { error.value = String(e) },
+  onNotice: (m) => { notice.value = m },
   openReview: (row) => openReview(row.raw),
   deleteFile: (row, source) => deleteFile(row, source),
 })
+// Membership-label actions (In Library / In Workspace). Remove-from-library routes to
+// the typed confirm; remove-from-workspace drops the workspace item (files untouched).
+const membership = useMembershipActions({
+  onError: (e) => { error.value = String(e) },
+  reload: load,
+  removeLibrary: (trackId) => askRemove([trackId]),
+  removeWorkspace: async (itemId) => { try { await api.workspaceRemove([itemId]); invalidateData(); await load() } catch (e) { error.value = String(e) } },
+})
+// Interactive "Find on YouTube" / "Find local file" pickers (see SearchPickerDialog).
+const { picker, openYoutube, openLocal, onPick } = useSearchPicker({
+  onError: (e) => { error.value = String(e) }, reload: load,
+})
+// Force-set: "Set YouTube link…" / "Pick local file…" (verify + confirm w/ score).
+const { fset, openSetYoutube, pickLocalFile, apply: applyForceSet, setValue: setForceValue } = useForceSet({
+  onError: (e) => { error.value = String(e) }, reload: load,
+})
+const trackEntity = (row) => ({ kind: 'track', id: row.id, artist: trackAuthor(row.raw), title: row.raw.title || row.raw.yt_title || row.raw.filename || '' })
+const info = ref({ open: false, title: '', data: {}, editable: [] })
+async function openInfo(row) {
+  try {
+    const full = await api.track(row.id)
+    info.value = { open: true, title: trackTitle(row.raw), data: full, editable: ['artist', 'title', 'yt_id', 'yt_title', 'yt_channel'] }
+  } catch (e) { error.value = String(e) }
+}
+async function saveInfo(fields) {
+  try { await api.trackPatch(info.value.data.id, fields); info.value.open = false; invalidateData(); await load() }
+  catch (e) { error.value = String(e) }
+}
 
 // Title falls back file name -> fetched YouTube title -> id; never blank.
 function trackTitle(row) { return row.title || row.yt_title || row.filename || row.yt_id || '(untitled)' }
@@ -62,6 +100,7 @@ const entries = computed(() => {
       hasLink: !!row.yt_id, aliveLink: row.yt_health === 'ok',
       deadLink: row.yt_health === 'dead' || row.yt_health === 'private',
       localCount: row.has_local ? 1 : 0, downloaded: !!row.downloaded, check: row.check,
+      ytId: row.yt_id, inLibrary: row.id, inWorkspace: wsByTrack.value.get(row.id) ?? null,
     })
     return {
       kind: 'track', key: `t${row.id}`, id: row.id, raw: row,
@@ -79,7 +118,8 @@ const entries = computed(() => {
       search: `${link.youtube_id || ''} ${link.youtube_url}`.toLowerCase(),
     }
   })
-  const files = localFiles.value.filter((file) => !file.tracks?.length).map((file) => {
+  const files = localFiles.value.filter((file) => !file.tracks?.length
+    && !wsFileRefs.value.has(`${file.folder_identity}|${file.relative_path}`)).map((file) => {
     const labels = buildLabels({ localCount: 1, untracked: true })
     return {
       kind: 'file', key: `f${file.folder_identity}-${file.relative_path}`, raw: file,
@@ -115,6 +155,7 @@ const listRows = computed(() => paged.value.map((e) => ({
   ytUrl: ytUrl(e.raw), ytId: entryYtId(e),
   trackId: e.kind === 'track' ? e.id : null,
   setCheck: (v) => { const r = rows.value.find((x) => x.id === e.id); if (r) r.check = v },
+  embed: e.kind === 'track' ? (source) => api.trackEmbed(e.id, source) : null,
   fileSrc: localSrc(e), downloadSrc: entryYtId(e) ? api.downloadAudioUrl(entryYtId(e)) : null,
   revealArg: (source) => source === 'download' ? { download_yt_id: entryYtId(e) }
     : e.kind === 'track' ? { track_id: e.id }
@@ -136,11 +177,17 @@ const deletable = computed(() => selectedTrackRows.value.filter((row) => row.has
 async function load() {
   loading.value = true; error.value = ''
   try {
-    const [library, links, files] = await Promise.all([api.library(), api.savedLinks(), api.localFiles()])
-    rows.value = library.rows; savedLinks.value = links.links; localFiles.value = files.files
+    const [library, links, files, ws] = await Promise.all([api.library(), api.savedLinks(), api.localFiles(), api.workspace()])
+    rows.value = library.rows; savedLinks.value = links.links; localFiles.value = files.files; wsItems.value = ws.items
   } catch (e) { error.value = String(e) }
   finally { loading.value = false }
 }
+// Add absolute-path files straight into the Library as tracks; shared picker.
+const { picking, pickFiles } = useFilePicker({
+  target: 'library',
+  onDone: async () => { invalidateData(); await load() },
+  onError: (e) => { error.value = String(e) },
+})
 // Verify is a paced background task now (see Activity). scope: 'all' | 'unverified'.
 async function startVerify(scope) {
   verifying.value = true; error.value = ''
@@ -172,11 +219,27 @@ function localSrc(e) {
 }
 function onLabel(row, label, ev) {
   const target = [ev.clientX, ev.clientY]
-  if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, row }
-  else if (label.key === 'local') fileMenu.value = { open: true, target, row, source: 'local' }
-  else if (label.key === 'downloaded') fileMenu.value = { open: true, target, row, source: 'download' }
+  if (label.key === 'youtube' || label.key === 'dead') { ytMenuState.value = { items: ytMenuItems(row.ytId, { canFindLocal: row.kind === 'track' && !row.raw.has_local, canSetLocal: row.kind === 'track' }) }; ytMenu.value = { open: true, target, row } }
+  else if (label.key === 'local') fileMenu.value = { open: true, target, row, source: 'local', items: fileMenuItems({ deletable: true, source: 'local', canFindYoutube: row.kind === 'track' && !row.ytId, canSetYoutube: row.kind === 'track', canEmbed: row.kind === 'track' }) }
+  else if (label.key === 'downloaded') fileMenu.value = { open: true, target, row, source: 'download', items: downloadMenuItems({ deletable: true }) }
   else if (label.key === 'confirmed' || label.key === 'rejected') statusMenu.value = { open: true, target, row }
   else if (label.key === 'untracked') untrackedMenu.value = { open: true, target, row }
+  else if (label.key === 'inlibrary') memberMenu.value = { open: true, target, label, row, items: libraryLabelMenu({ trackId: label.trackId, onScreen: 'library', inWorkspace: wsByTrack.value.has(label.trackId) }) }
+  else if (label.key === 'inworkspace') memberMenu.value = { open: true, target, label, row, items: workspaceLabelMenu({ onScreen: 'library', inLibrary: true }) }
+}
+function onFileMenu(mode, row, source) {
+  if (mode === 'find-youtube') openYoutube({ title: trackTitle(row.raw), artist: trackAuthor(row.raw), songTitle: row.raw.title || row.raw.yt_title || row.raw.filename || '', target: { kind: 'track', id: row.id } })
+  else if (mode === 'set-youtube') openSetYoutube(trackEntity(row))
+  else fileAction(mode, row, source)   // embed-metadata + play/info/reveal/delete all handled here
+}
+function onYtMenu(mode, row) {
+  if (mode === 'find-local') openLocal({ title: trackTitle(row.raw), query: trackTitle(row.raw), target: { kind: 'track', id: row.id } })
+  else if (mode === 'pick-local') pickLocalFile(trackEntity(row))
+  else ytAction(mode, row)
+}
+function onMemberMenu(mode) {
+  if (mode === 'info') openInfo(memberMenu.value.row)
+  else membership.run(mode, memberMenu.value.label)
 }
 async function untrackedAction(mode) {
   const row = untrackedMenu.value.row; untrackedMenu.value.open = false
@@ -194,9 +257,8 @@ async function sendFileToWorkspace(file) {
   } catch (e) { error.value = String(e) }
   finally { matching.value = null }
 }
-// File menu delete row exists here (Library manages deletion); source picks the
-// wording. The play/info/reveal branches live in the shared fileAction.
-const fileMenuList = computed(() => fileMenuItems({ deletable: true, source: fileMenu.value.source }))
+// File menu items are built per-row in onLabel (source picks the delete wording;
+// canFindYoutube adds the picker). Delete branches live in the shared fileAction.
 // Injected into useRowActions.fileAction. Download = simple confirm (app output);
 // mp3-folder file = approved-delete flow; untracked file must be added first.
 function deleteFile(row, source) {
@@ -240,20 +302,24 @@ async function addAllUntracked() {
   } catch (e) { error.value = String(e) }
   finally { addingFiles.value = false }
 }
-async function sendToWorkspace() {
-  try { await Promise.all(selectedTrackRows.value.map((row) => api.workspaceLibrary(row.id))); selected.value = []; invalidateData(); await load() }
-  catch (e) { error.value = String(e) }
+// One "Send to Workspace" for the whole selection: exact tracks via workspaceLibrary,
+// untracked files via workspaceAddFiles. (Merged from the old two separate buttons.)
+async function sendSelectionToWorkspace() {
+  const trackIds = selectedTrackIds.value
+  const fileRefs = selectedFileRefs.value
+  if (!trackIds.length && !fileRefs.length) return
+  addingFiles.value = true; error.value = ''; notice.value = ''
+  try {
+    await Promise.all(trackIds.map((id) => api.workspaceLibrary(id)))
+    if (fileRefs.length) await api.workspaceAddFiles(fileRefs)
+    notice.value = `Sent ${trackIds.length + fileRefs.length} to Workspace.`
+    selected.value = []; invalidateData(); await load()
+  } catch (e) { error.value = String(e) } finally { addingFiles.value = false }
 }
 async function addSelectedFiles() {
   if (!selectedFileRefs.value.length) return
   addingFiles.value = true; error.value = ''; notice.value = ''
   try { const r = await api.addFilesToLibrary(selectedFileRefs.value); notice.value = `Added ${r.added} to Library.`; selected.value = []; invalidateData(); await load() }
-  catch (e) { error.value = String(e) } finally { addingFiles.value = false }
-}
-async function sendSelectedFiles() {
-  if (!selectedFileRefs.value.length) return
-  addingFiles.value = true; error.value = ''; notice.value = ''
-  try { const r = await api.workspaceAddFiles(selectedFileRefs.value); notice.value = `Sent ${r.added} to Workspace.`; selected.value = []; invalidateData(); await load() }
   catch (e) { error.value = String(e) } finally { addingFiles.value = false }
 }
 async function previewDelete() {
@@ -296,17 +362,17 @@ useTabRefresh('library', load)
     <v-btn icon variant="text" :loading="loading" aria-label="Refresh" @click="load">
       <v-icon>mdi-refresh</v-icon><v-tooltip activator="parent" location="bottom">Refresh list</v-tooltip>
     </v-btn>
+    <v-btn icon variant="text" :loading="picking" aria-label="Add files" @click="pickFiles">
+      <v-icon>mdi-file-plus-outline</v-icon><v-tooltip activator="parent" location="bottom">Add files from disk as tracks (absolute path)</v-tooltip>
+    </v-btn>
     <v-btn icon variant="text" :loading="verifying" aria-label="Verify links" @click="verifyDialog = true">
       <v-icon>mdi-link-variant</v-icon><v-tooltip activator="parent" location="bottom">Verify links (background task)</v-tooltip>
     </v-btn>
-    <v-btn v-if="selectedTrackIds.length" icon color="primary" variant="text" aria-label="Send exact tracks to Workspace" @click="sendToWorkspace">
-      <v-icon>mdi-send</v-icon><v-tooltip activator="parent" location="bottom">Send {{ selectedTrackIds.length }} exact tracks to Workspace</v-tooltip>
+    <v-btn v-if="selectedTrackIds.length || selectedFileRefs.length" icon color="primary" variant="text" :loading="addingFiles" aria-label="Send to Workspace" @click="sendSelectionToWorkspace">
+      <v-icon>mdi-send</v-icon><v-tooltip activator="parent" location="bottom">Send {{ selectedTrackIds.length + selectedFileRefs.length }} to Workspace</v-tooltip>
     </v-btn>
     <v-btn v-if="selectedFileRefs.length" icon color="primary" variant="text" :loading="addingFiles" aria-label="Add files to Library" @click="addSelectedFiles">
       <v-icon>mdi-plus-box-multiple</v-icon><v-tooltip activator="parent" location="bottom">Add {{ selectedFileRefs.length }} files to Library</v-tooltip>
-    </v-btn>
-    <v-btn v-if="selectedFileRefs.length" icon color="primary" variant="text" :loading="addingFiles" aria-label="Send files to Workspace" @click="sendSelectedFiles">
-      <v-icon>mdi-folder-upload-outline</v-icon><v-tooltip activator="parent" location="bottom">Send {{ selectedFileRefs.length }} files to Workspace</v-tooltip>
     </v-btn>
     <v-btn v-if="deletable.length" icon color="error" variant="text" aria-label="Delete approved local files" @click="previewDelete">
       <v-icon>mdi-broom</v-icon><v-tooltip activator="parent" location="bottom">Delete {{ deletable.length }} approved local files (disk)</v-tooltip>
@@ -341,15 +407,6 @@ useTabRefresh('library', load)
     <template #badge="{ row }"><span v-if="row.kind === 'track'" class="text-caption text-medium-emphasis ml-2">#{{ row.id }}</span></template>
     <template #actions="{ row }">
       <v-btn v-if="row.kind === 'saved'" size="small" variant="tonal" @click="matchingLink = row.raw; matchFile = null">Match local file</v-btn>
-      <v-menu v-else-if="row.kind === 'track'">
-        <template #activator="{ props }">
-          <v-btn icon="mdi-dots-vertical" size="small" variant="text" aria-label="Track actions" v-bind="props" />
-        </template>
-        <v-list density="compact" min-width="160">
-          <v-list-item prepend-icon="mdi-eye-check-outline" title="Review" @click="openReview(row.raw)" />
-          <v-list-item prepend-icon="mdi-delete-outline" title="Remove from Library" base-color="error" @click="askRemove([row.id])" />
-        </v-list>
-      </v-menu>
     </template>
     <template #empty><div class="pa-6 text-medium-emphasis">Nothing here yet.</div></template>
   </CurationList>
@@ -361,10 +418,14 @@ useTabRefresh('library', load)
   </TypedConfirmDialog>
   <v-alert v-if="audit.length" variant="tonal" type="info" class="mt-3">Last deletion audit: {{ audit.filter((entry) => entry.outcome === 'deleted').length }} deleted, {{ audit.filter((entry) => entry.outcome !== 'deleted').length }} rejected.</v-alert>
 
-  <ActionMenu v-model="ytMenu.open" :target="ytMenu.target" :items="YT_MENU_ITEMS" @select="(mode) => { ytAction(mode, ytMenu.row); ytMenu.open = false }" />
-  <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="fileMenuList" @select="(mode) => { fileAction(mode, fileMenu.row, fileMenu.source); fileMenu.open = false }" />
+  <ActionMenu v-model="ytMenu.open" :target="ytMenu.target" :items="ytMenuState.items" @select="(mode) => { onYtMenu(mode, ytMenu.row); ytMenu.open = false }" />
+  <ActionMenu v-model="memberMenu.open" :target="memberMenu.target" :items="memberMenu.items" @select="(mode) => { onMemberMenu(mode); memberMenu.open = false }" />
+  <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="fileMenu.items" @select="(mode) => { onFileMenu(mode, fileMenu.row, fileMenu.source); fileMenu.open = false }" />
+  <SearchPickerDialog v-model="picker.open" :mode="picker.mode" :title="picker.title" :initial-query="picker.query" :artist="picker.artist" :song-title="picker.songTitle" @pick="onPick" />
+  <ForceSetDialog :state="fset" @update:open="fset.open = $event" @update:value="setForceValue" @apply="applyForceSet" />
+  <InfoEditDialog v-model="info.open" :title="info.title" :data="info.data" :editable="info.editable" @save="saveInfo" />
   <ActionMenu v-model="statusMenu.open" :target="statusMenu.target" :items="STATUS_MENU_ITEMS" @select="(mode) => { statusAction(mode, statusMenu.row); statusMenu.open = false }" />
-  <ActionMenu v-model="untrackedMenu.open" :target="untrackedMenu.target" :items="UNTRACKED_MENU_ITEMS" @select="untrackedAction" />
+  <ActionMenu v-model="untrackedMenu.open" :target="untrackedMenu.target" :items="untrackedMenuItems()" @select="untrackedAction" />
   <InfoDialog v-model="fileInfo" />
   <VerifyScopeDialog v-model="verifyDialog" :busy="verifying" @pick="startVerify" />
   <ConfirmDialog :model-value="!!downloadDeleteConfirm" title="Delete downloaded file?" confirm-label="Delete" :max-width="440" @update:model-value="(v) => { if (!v) downloadDeleteConfirm = null }" @confirm="confirmDownloadDelete">

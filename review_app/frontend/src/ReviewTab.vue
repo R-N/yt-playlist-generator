@@ -9,6 +9,7 @@ const queue = ref([])
 const idx = ref(0)
 const status = ref('unreviewed')
 const loading = ref(false)
+const finding = ref(false)
 const error = ref('')
 const fromLibrary = ref(false)   // reviewing a single track handed over by the Library
 
@@ -80,6 +81,22 @@ function advance() {
 
 function prev() { idx.value = prevIndex(idx.value) }
 
+// Replace this track's YouTube candidate with the best fresh search hit (skips ids
+// already rejected for it). Applied as unreviewed; the panel updates in place.
+async function findAnother() {
+  const t = current.value
+  if (!t) return
+  finding.value = true; error.value = ''
+  try {
+    const updated = await api.reviewFindYoutube(t.id)
+    queue.value.splice(idx.value, 1, updated)
+    invalidateData()
+    refreshCounts()
+  } catch (e) {
+    error.value = e.message?.includes('404') ? 'No new YouTube match found (all hits rejected or none scored).' : String(e)
+  } finally { finding.value = false }
+}
+
 function onKey(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return
   const action = keyToAction(e.key)
@@ -111,6 +128,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
       <span class="metric"><span class="metric-label">Format</span>{{ current.audio_format || '—' }} {{ fmt(current.audio_bitrate) }}k</span>
     </template>
     <v-spacer />
+    <v-btn icon variant="text" :loading="finding" :disabled="!current" aria-label="Find another YouTube link" @click="findAnother">
+      <v-icon>mdi-link-variant-plus</v-icon><v-tooltip activator="parent" location="bottom">Find another YouTube link (skips rejected)</v-tooltip>
+    </v-btn>
     <v-btn icon color="error" :disabled="!current" aria-label="Reject (R / ←)" @click="decide(false)">
       <v-icon>mdi-close</v-icon><v-tooltip activator="parent" location="bottom">Reject · R / ←</v-tooltip>
     </v-btn>

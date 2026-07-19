@@ -53,23 +53,24 @@ def active():
         return _active
 
 
-def run(kind, title, ids, do_one, delay=None):
-    """Start a background verify over `ids`. Raises RuntimeError if one is already
-    running. Returns the created task row."""
+def run(kind, title, ids, do_one, delay=None, noun="flagged"):
+    """Start a background sweep over `ids`. Raises RuntimeError if one is already
+    running. `noun` labels the `found` count in the finished-task message
+    ('flagged' for verify, 'found' for auto link/file finding). Returns the task row."""
     global _active
     with _lock:
         if _active is not None:
-            raise RuntimeError("a verify task is already running")
+            raise RuntimeError("a background task is already running")
         task_id = db.create_task(kind, title, len(ids))
         _active = task_id
     thread = threading.Thread(
-        target=_worker, args=(task_id, list(ids), do_one, delay or DELAY), daemon=True)
+        target=_worker, args=(task_id, list(ids), do_one, delay or DELAY, noun), daemon=True)
     _threads[task_id] = thread
     thread.start()
     return db.get_task(task_id)
 
 
-def _worker(task_id, ids, do_one, delay):
+def _worker(task_id, ids, do_one, delay, noun="flagged"):
     global _active
     fails = 0
     try:
@@ -92,9 +93,9 @@ def _worker(task_id, ids, do_one, delay):
             time.sleep(random.uniform(*delay))
         task = db.get_task(task_id)
         if is_cancelled(task_id):
-            db.finish_task(task_id, "cancelled", f"{task['found']} flagged")
+            db.finish_task(task_id, "cancelled", f"{task['found']} {noun}")
         else:
-            db.finish_task(task_id, "done", f"{task['found']} flagged")
+            db.finish_task(task_id, "done", f"{task['found']} {noun}")
     finally:
         _cancel.discard(task_id)
         with _lock:

@@ -481,6 +481,46 @@ def set_workspace_metadata(item_id, meta):
         conn.close()
 
 
+def set_workspace_youtube(item_id, yt_id, meta=None):
+    """Attach a found YouTube id to a Workspace item (link-less/file-only or a dead
+    link getting replaced). Sets youtube_id + its canonical url (table CHECK ties the
+    two) and merges search metadata as health='ok'."""
+    meta = dict(meta or {})
+    meta.setdefault("health", "ok")
+    conn = connect()
+    try:
+        with conn:
+            row = conn.execute(
+                "SELECT metadata_json FROM workspace_items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"No Workspace item id {item_id}")
+            existing = _load_json(row["metadata_json"])
+            existing.update(meta)
+            conn.execute(
+                "UPDATE workspace_items SET youtube_id=?, "
+                "youtube_url='https://www.youtube.com/watch?v=' || ?, "
+                "title=COALESCE(?, title), channel=COALESCE(?, channel), "
+                "metadata_json=? WHERE id=?",
+                (yt_id, yt_id, meta.get("title"), meta.get("channel"),
+                 json.dumps(existing, default=str), item_id))
+    finally:
+        conn.close()
+
+
+def set_workspace_file(item_id, folder_identity, relative_path):
+    """Attach a found local file (folder identity + relative path) to a Workspace item."""
+    conn = connect()
+    try:
+        with conn:
+            n = conn.execute(
+                "UPDATE workspace_items SET folder_identity=?, relative_path=? WHERE id=?",
+                (folder_identity, relative_path, item_id)).rowcount
+            if not n:
+                raise KeyError(f"No Workspace item id {item_id}")
+    finally:
+        conn.close()
+
+
 def sync_catalog_links(records):
     """Refresh exact local links from current validated catalog.
 
@@ -700,6 +740,35 @@ def set_track_health(track_id, health):
         conn.close()
 
 
+def rejected_yt_ids(track_id):
+    """YouTube ids the user rejected for this track (append-only decisions log).
+    Auto link-finding excludes these so it never re-proposes a link you said no to."""
+    conn = connect()
+    try:
+        return {r["yt_id"] for r in conn.execute(
+            "SELECT DISTINCT yt_id FROM decisions WHERE track_id=? AND decision=0 "
+            "AND yt_id IS NOT NULL", (track_id,))}
+    finally:
+        conn.close()
+
+
+def apply_track_yt(track_id, yt_id, meta=None):
+    """Set a track's YouTube link to a freshly-found candidate: replace yt_id/title/
+    channel/views, reset check to unreviewed (NULL) and clear the health cache so it
+    re-enters Verify/Review. meta is a search-result entry (title/channel/view_count)."""
+    meta = meta or {}
+    conn = connect()
+    try:
+        with conn:
+            conn.execute(
+                'UPDATE tracks SET yt_id=?, yt_title=?, yt_channel=?, yt_views=?, '
+                '"check"=NULL, yt_health=NULL WHERE id=?',
+                (yt_id, meta.get("title"), meta.get("channel"),
+                 meta.get("view_count"), track_id))
+    finally:
+        conn.close()
+
+
 def remove_tracks(track_ids):
     """Delete Library track rows and their dependents (links, decisions; null out
     saved-link/workspace refs). Returns the removed tracks' youtube ids so the
@@ -723,6 +792,24 @@ def remove_tracks(track_ids):
         conn.close()
 
 
+def _find_or_create_track_by_filename(conn, basename):
+    """Track whose filename == basename, creating an unreviewed one if none. Returns
+    (track_id, created). Shared by every "file becomes a Library track" path."""
+    row = conn.execute("SELECT id FROM tracks WHERE filename=?", (basename,)).fetchone()
+    if row is not None:
+        return row["id"], False
+    cur = conn.execute('INSERT INTO tracks (filename, "check") VALUES (?, NULL)', (basename,))
+    return cur.lastrowid, True
+
+
+def _existing_link_track(conn, folder_identity, relative_path):
+    """track_id already linked to this file (available), or None."""
+    row = conn.execute(
+        "SELECT track_id FROM track_file_links WHERE folder_identity=? AND relative_path=? "
+        "AND available=1 LIMIT 1", (folder_identity, relative_path)).fetchone()
+    return row["track_id"] if row is not None else None
+
+
 def add_local_file_to_library(folder_identity, relative_path, basename,
                               file_size=None, modified_at=None):
     """Make an untracked local file a Library entry: find-or-create a track by
@@ -730,18 +817,94 @@ def add_local_file_to_library(folder_identity, relative_path, basename,
     conn = connect()
     try:
         with conn:
-            existing = conn.execute(
-                "SELECT track_id FROM track_file_links WHERE folder_identity=? AND relative_path=? "
-                "AND available=1 LIMIT 1", (folder_identity, relative_path)).fetchone()
-            if existing is not None:
+            if _existing_link_track(conn, folder_identity, relative_path) is not None:
                 raise ValueError("file already linked to a track")
-            track = conn.execute("SELECT id FROM tracks WHERE filename=?", (basename,)).fetchone()
-            if track is not None:
-                track_id, created = track["id"], False
-            else:
-                cur = conn.execute('INSERT INTO tracks (filename, "check") VALUES (?, NULL)', (basename,))
-                track_id, created = cur.lastrowid, True
+            track_id, created = _find_or_create_track_by_filename(conn, basename)
             _link_file(conn, track_id, folder_identity, relative_path, file_size, modified_at)
+            return {"track_id": track_id, "created": created}
+    finally:
+        conn.close()
+
+
+# Columns the Info/edit modal may change (fixed allow-lists — never interpolate a
+# caller-supplied column name into SQL).
+_EDITABLE_TRACK_COLUMNS = ("artist", "title", "yt_id", "yt_title", "yt_channel")
+_EDITABLE_WS_COLUMNS = ("title", "channel")
+
+
+def update_track_fields(track_id, fields):
+    cols = [c for c in _EDITABLE_TRACK_COLUMNS if c in fields]
+    if not cols:
+        raise ValueError("no editable fields")
+    conn = connect()
+    try:
+        with conn:
+            if conn.execute("SELECT 1 FROM tracks WHERE id=?", (track_id,)).fetchone() is None:
+                raise KeyError(f"No track with id {track_id}")
+            conn.execute(f"UPDATE tracks SET {', '.join(c + '=?' for c in cols)} WHERE id=?",
+                         [fields[c] for c in cols] + [track_id])
+    finally:
+        conn.close()
+
+
+def update_workspace_fields(item_id, fields):
+    cols = [c for c in _EDITABLE_WS_COLUMNS if c in fields]
+    if not cols:
+        raise ValueError("no editable fields")
+    conn = connect()
+    try:
+        with conn:
+            n = conn.execute(f"UPDATE workspace_items SET {', '.join(c + '=?' for c in cols)} WHERE id=?",
+                             [fields[c] for c in cols] + [item_id]).rowcount
+            if not n:
+                raise KeyError(f"No Workspace item id {item_id}")
+    finally:
+        conn.close()
+
+
+def link_file_to_track(track_id, folder_identity, relative_path, file_size=None, modified_at=None):
+    """Link a chosen local file to an EXISTING track (interactive 'Find local file').
+    Unlike add_local_file_to_library, the track already exists — just upsert the link.
+    A file belongs to one track (UNIQUE folder+path), so re-using another track's file
+    surfaces as a ValueError the API turns into a clean 409."""
+    conn = connect()
+    try:
+        with conn:
+            if conn.execute("SELECT 1 FROM tracks WHERE id=?", (track_id,)).fetchone() is None:
+                raise KeyError(f"No track with id {track_id}")
+            try:
+                _link_file(conn, track_id, folder_identity, relative_path, file_size, modified_at)
+            except sqlite3.IntegrityError as e:
+                raise ValueError("file is already linked to another track") from e
+    finally:
+        conn.close()
+
+
+def save_workspace_file_to_library(item_id, folder_identity, relative_path, basename,
+                                   file_size=None, modified_at=None, yt_id=None, yt_meta=None):
+    """"Save to library" for a Workspace item carrying a local file: find-or-create the
+    track by filename, link the file (idempotent if already linked to that track), and
+    point the Workspace item at the resulting track so it shows In Library. If the item
+    also had a YouTube link, stamp it onto a freshly-created track (never overwrite an
+    existing track's link). One transaction. Returns {'track_id', 'created'}."""
+    yt_meta = yt_meta or {}
+    conn = connect()
+    try:
+        with conn:
+            linked = _existing_link_track(conn, folder_identity, relative_path)
+            if linked is not None:
+                track_id, created = linked, False
+            else:
+                track_id, created = _find_or_create_track_by_filename(conn, basename)
+                _link_file(conn, track_id, folder_identity, relative_path, file_size, modified_at)
+            if created and yt_id:
+                conn.execute(
+                    "UPDATE tracks SET yt_id=?, yt_title=?, yt_channel=?, yt_views=? WHERE id=?",
+                    (yt_id, yt_meta.get("title"), yt_meta.get("channel"),
+                     yt_meta.get("view_count"), track_id))
+            if conn.execute("UPDATE workspace_items SET track_id=? WHERE id=?",
+                            (track_id, item_id)).rowcount == 0:
+                raise KeyError(f"No Workspace item id {item_id}")
             return {"track_id": track_id, "created": created}
     finally:
         conn.close()

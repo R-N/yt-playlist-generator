@@ -18,7 +18,13 @@ ENV_PATH = os.path.join(REPO_ROOT, ".env")
 MANAGED_KEYS = [
     "DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID", "ACOUSTID_API_KEY",
     "MP3_FOLDERS_JSON", "DOWNLOAD_FOLDER",
+    "YT_SEARCH_TOP_N", "TASK_DELAY_MIN", "TASK_DELAY_MAX",
+    "YT_MIN_SCORE", "LOCAL_MIN_SCORE",
+    "SEARCH_RESULT_LIMIT", "DELETE_TOKEN_TTL", "CLEANUP_EXTENSIONS",
 ]
+
+_DEFAULT_CLEANUP_EXTS = (".mp4", ".webm", ".m4a", ".mp4.part", ".webm.part",
+                         ".m4a.part", ".mp4.ytdl", ".webm.ytdl", ".m4a.ytdl")
 # Which of those are secret -> never returned in full to the client.
 SECRET_KEYS = {"DISCORD_BOT_TOKEN", "ACOUSTID_API_KEY"}
 _APP_OWNED_ENV = {}
@@ -67,6 +73,70 @@ def parse_download_folder(value):
     if not os.path.isdir(folder):
         raise ValueError(f"DOWNLOAD_FOLDER does not exist: {folder}")
     return folder
+
+
+def search_top_n(default=3):
+    """How many YouTube search hits to score when auto-finding a link (1..10)."""
+    try:
+        return max(1, min(int(get("YT_SEARCH_TOP_N", default)), 10))
+    except (TypeError, ValueError):
+        return default
+
+
+def task_delay(default=(1.5, 4.0)):
+    """(min, max) seconds between paced background-task fetches. max >= min >= 0."""
+    def num(key, fallback):
+        try:
+            return max(0.0, float(get(key, fallback)))
+        except (TypeError, ValueError):
+            return fallback
+    lo = num("TASK_DELAY_MIN", default[0])
+    hi = num("TASK_DELAY_MAX", default[1])
+    return (lo, max(lo, hi))
+
+
+def yt_min_score(default=0):
+    """Lowest review score an auto find-YouTube hit may have and still be applied.
+    Lower = accept weaker matches (may be negative; the ranker penalizes)."""
+    try:
+        return int(float(get("YT_MIN_SCORE", default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def local_min_score(default=60):
+    """Lowest filename partial-ratio (0..100) an auto find-local match may have."""
+    try:
+        return max(0, min(int(float(get("LOCAL_MIN_SCORE", default))), 100))
+    except (TypeError, ValueError):
+        return default
+
+
+def search_result_limit(default=10):
+    """How many ranked candidates a search picker returns (1..50)."""
+    try:
+        return max(1, min(int(float(get("SEARCH_RESULT_LIMIT", default))), 50))
+    except (TypeError, ValueError):
+        return default
+
+
+def delete_token_ttl(default=60):
+    """Seconds a delete-confirmation token stays valid before it expires (min 5)."""
+    try:
+        return max(5, int(float(get("DELETE_TOKEN_TTL", default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def cleanup_extensions(default=_DEFAULT_CLEANUP_EXTS):
+    """Extensions the download-cleanup sweep treats as junk (besides zero-byte files).
+    Stored as a comma/space list; normalized to a lowercase, dot-prefixed tuple."""
+    raw = get("CLEANUP_EXTENSIONS")
+    if not raw:
+        return tuple(default)
+    parts = [p.strip().lower() for p in raw.replace(",", " ").split()]
+    exts = tuple("." + p.lstrip(".") for p in parts if p.strip("."))
+    return exts or tuple(default)
 
 
 def configured_download_folder(default):

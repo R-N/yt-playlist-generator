@@ -14,7 +14,30 @@ import { api } from './api'
 import {
   useLabelFilter, usePagination, useSelection, ytUrl, fileMenuItems,
   usePreview, useRowActions,
+  ytMenuItems, libraryLabelMenu, workspaceLabelMenu,
 } from './curation'
+
+const actions = (items) => items.map((i) => i.action)
+
+describe('label menu builders', () => {
+  it('ytMenuItems adds a Copy ID row carrying the id, only when an id exists', () => {
+    expect(ytMenuItems('dQw4w9WgXcQ')).toContainEqual(
+      expect.objectContaining({ action: 'copyid', title: 'Copy ID · dQw4w9WgXcQ' }))
+    expect(actions(ytMenuItems(null))).not.toContain('copyid')
+  })
+  it('libraryLabelMenu hides Send-to-workspace when already in workspace and Show-in-library on the library screen', () => {
+    expect(actions(libraryLabelMenu({ trackId: 5, onScreen: 'workspace', inWorkspace: false })))
+      .toEqual(['info', 'send-workspace', 'review', 'show-library', 'remove-library'])
+    expect(actions(libraryLabelMenu({ trackId: 5, onScreen: 'library', inWorkspace: true })))
+      .toEqual(['info', 'review', 'remove-library'])   // send-workspace + show-library both dropped
+  })
+  it('workspaceLabelMenu hides Save-to-library when already in library and Show-in-workspace on the workspace screen', () => {
+    expect(actions(workspaceLabelMenu({ onScreen: 'library', inLibrary: false })))
+      .toEqual(['info', 'save-library', 'show-workspace', 'remove-workspace'])
+    expect(actions(workspaceLabelMenu({ onScreen: 'workspace', inLibrary: true })))
+      .toEqual(['info', 'remove-workspace'])
+  })
+})
 
 describe('useLabelFilter tri-state cycle', () => {
   it('cycles ignore -> must-have -> exclude -> ignore', () => {

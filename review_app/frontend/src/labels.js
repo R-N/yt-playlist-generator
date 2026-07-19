@@ -7,13 +7,21 @@
 //   localCount - number of linked mp3-folder files (may be >1 = duplicates)
 //   downloaded - a file exists in the download folder (distinct from local file)
 //   check      - review decision: 1 confirmed, 0 rejected, null unreviewed
-export function buildLabels({ hasLink = false, aliveLink = false, deadLink = false, localCount = 0, downloaded = false, untracked = false, check = null } = {}) {
+//   ytId       - YouTube id (shown in the YouTube label's hover + Copy ID action)
+//   inLibrary  - track id if the entity is a Library track, else null (adds "In Library")
+//   inWorkspace- workspace item id if the entity is staged in Workspace, else null
+// `tooltip` (when set) is what LabelRow shows on hover; the id-bearing labels carry
+// their id so the row-menu builders can put it in a title ("Show in Library · #1412").
+export function buildLabels({ hasLink = false, aliveLink = false, deadLink = false, localCount = 0, downloaded = false, untracked = false, check = null, ytId = null, inLibrary = null, inWorkspace = null } = {}) {
   const labels = []
-  if (deadLink) labels.push({ key: 'dead', label: 'Unavailable', color: 'error', icon: 'mdi-youtube-off' })
-  else if (aliveLink || hasLink) labels.push({ key: 'youtube', label: 'YouTube', color: 'error', icon: 'mdi-youtube' })
+  const ytSuffix = ytId ? ` · ${ytId}` : ''
+  if (deadLink) labels.push({ key: 'dead', label: 'Unavailable', color: 'error', icon: 'mdi-youtube-off', tooltip: `Unavailable${ytSuffix}`, ytId })
+  else if (aliveLink || hasLink) labels.push({ key: 'youtube', label: 'YouTube', color: 'error', icon: 'mdi-youtube', tooltip: `YouTube${ytSuffix}`, ytId })
   if (localCount) labels.push({ key: 'local', label: localCount > 1 ? `${localCount} files` : 'Local file', color: 'primary', icon: 'mdi-music' })
   if (untracked) labels.push({ key: 'untracked', label: 'Untracked file', color: 'warning', icon: 'mdi-file-question-outline' })
   if (downloaded) labels.push({ key: 'downloaded', label: 'Downloaded', color: 'info', icon: 'mdi-download-circle' })
+  if (inLibrary != null) labels.push({ key: 'inlibrary', label: 'In Library', color: 'secondary', icon: 'mdi-music-box-multiple', tooltip: `In Library · #${inLibrary}`, trackId: inLibrary })
+  if (inWorkspace != null) labels.push({ key: 'inworkspace', label: 'In Workspace', color: 'deep-purple-accent-3', icon: 'mdi-tray-full', tooltip: 'In Workspace', workspaceItemId: inWorkspace })
   if (check === 1) labels.push({ key: 'confirmed', label: 'Confirmed', color: 'success', icon: 'mdi-check-decagram' })
   else if (check === 0) labels.push({ key: 'rejected', label: 'Rejected', color: 'grey', icon: 'mdi-close-circle-outline' })
   return labels

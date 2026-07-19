@@ -7,6 +7,7 @@ Safety posture:
   - Curation writes go through db.py (append-only decisions + atomic export).
 """
 import os
+import contextlib
 import csv
 import importlib.util
 import io
@@ -67,8 +68,7 @@ class FileCatalog:
 _CATALOG = FileCatalog((), MappingProxyType({}))
 _decision_count = 0     # since-startup counter for auto-export
 RUN_STORAGE = os.path.join(os.path.dirname(__file__), "workspace_runs")
-_DELETE_TOKENS = {}
-_DELETE_TOKEN_TTL = 60
+_DELETE_TOKENS = {}   # token TTL is Settings-tunable (settings.delete_token_ttl)
 
 # The downloader names files `... [<id>].ext`; this pulls the id back out.
 _DOWNLOAD_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{11})\]")
@@ -178,6 +178,18 @@ def _swap_file_catalog(records):
 def _install_catalog(records):
     db.sync_catalog_links(records.records)
     _swap_file_catalog(records)
+
+
+def _refresh_catalog():
+    """Rebuild the in-memory catalog from disk so a local search/find sees files added
+    since startup (e.g. a just-downloaded track). Only the searchable records are swapped
+    in — no db.sync_catalog_links — so it's cheap enough to run on an explicit find.
+    ponytail: full walk of every configured folder; fine for an on-demand action, add
+    incremental/watch indexing if huge libraries make this slow."""
+    try:
+        _swap_file_catalog(_build_file_catalog(settings.configured_mp3_folders()))
+    except ValueError:
+        pass   # a folder went missing — keep the last good catalog
 
 
 def _record_for_filename(filename):
@@ -370,10 +382,10 @@ def _record_for_ref(folder_identity, relative_path):
                  if r["folder_identity"] == folder_identity and r["relative_path"] == relative_path), None)
 
 
-def _tags_from_record(record):
-    """Best-effort artist/title from a file's tags (link-less/file-only items)."""
-    path = _safe_delete_record(record) if record is not None else None
-    if not path:
+def _read_audio_tags(path):
+    """Best-effort artist/title from a file's tags. Reads any existing path (mutagen),
+    so out-of-folder staged files work too — not only indexed catalog files."""
+    if not path or not os.path.isfile(path):
         return {}
     try:
         from mutagen import File as MutagenFile
@@ -388,10 +400,23 @@ def _tags_from_record(record):
         return {}
 
 
-@app.get("/api/workspace")
-def api_workspace():
-    items = db.list_workspace()
+def _tags_from_record(record):
+    """Best-effort artist/title from a catalog file's tags (link-less/file-only items)."""
+    return _read_audio_tags(_safe_delete_record(record) if record is not None else None)
+
+
+def _decorate_workspace_items(items):
+    """Add the derived fields the UI's labels need onto raw db.list_workspace() rows:
+    file-ref classification (is_download_file / downloaded) and best-effort file tags for
+    link-less items. EVERY endpoint returning workspace items must route through this, or
+    a reload (e.g. the enrich loop) drops the fields and the labels flicker/misfire."""
+    downloaded_ids = _downloaded_ids()
     for item in items:
+        # A download-folder file is "downloaded", not a local/untracked file. Link-only
+        # items are "downloaded" when an id-named file exists in the download folder.
+        is_dl_file = _is_download_ref(item)
+        item["is_download_file"] = is_dl_file
+        item["downloaded"] = is_dl_file or bool(item.get("youtube_id") and item["youtube_id"] in downloaded_ids)
         if item.get("youtube_id") or item.get("track_title"):
             continue
         record = None
@@ -401,7 +426,12 @@ def api_workspace():
             record = _record_for_ref(item["folder_identity"], item["relative_path"])
         if record is not None:
             item.update(_tags_from_record(record))
-    return {"items": items}
+    return items
+
+
+@app.get("/api/workspace")
+def api_workspace():
+    return {"items": _decorate_workspace_items(db.list_workspace())}
 
 
 class WorkspaceEnrich(BaseModel):
@@ -484,7 +514,7 @@ def api_workspace_enrich(req: WorkspaceEnrich):
     remaining = max(0, len(targets) - max(1, req.limit))
     for it in targets[:max(1, req.limit)]:
         db.set_workspace_metadata(it["id"], _resolve_yt_metadata(it["youtube_id"]))
-    return {"items": db.list_workspace(),
+    return {"items": _decorate_workspace_items(db.list_workspace()),
             "checked": [it["id"] for it in targets[:max(1, req.limit)]],
             "remaining": remaining}
 
@@ -619,6 +649,59 @@ def api_workspace_save_links(req: WorkspaceIds):
         raise HTTPException(status_code=409, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+def _item_carries_file(item):
+    """A Workspace item that carries an untracked local file (so "Save to library" should
+    make it a Library track, not a saved link). One predicate, server-side, so bulk and
+    per-row routing can never drift."""
+    return bool(item.get("relative_path")) and not item.get("track_id")
+
+
+@app.post("/api/workspace/save-to-library")
+def api_workspace_save_to_library(req: WorkspaceIds):
+    """"Save to library" for a Workspace selection, routing each item by kind — the single
+    place this decision lives, so the per-row action and the bulk button behave identically:
+      • carries an untracked file  -> make it a Library track (link carried onto the track)
+      • otherwise, has a YouTube id -> a saved link
+    Returns per-item outcomes plus the saved-links result for the link subset."""
+    items = {it["id"]: it for it in db.list_workspace()}
+    saved_tracks, link_ids, results = [], [], []
+    try:
+        with jobs.curation_write_guard():
+            for iid in req.ids:
+                item = items.get(iid)
+                if item is None:
+                    results.append({"id": iid, "outcome": "missing"})
+                    continue
+                if _item_carries_file(item):
+                    fi, rp = item["folder_identity"], item["relative_path"]
+                    path = os.path.join(fi, rp)
+                    if not os.path.isfile(path):
+                        results.append({"id": iid, "outcome": "file-missing"})
+                        continue
+                    st = os.stat(path)
+                    r = db.save_workspace_file_to_library(
+                        iid, fi, rp, os.path.basename(rp), st.st_size, str(st.st_mtime_ns),
+                        yt_id=item.get("youtube_id"), yt_meta=_item_metadata(item))
+                    saved_tracks.append({"id": iid, **r})
+                    results.append({"id": iid, "outcome": "track", "track_id": r["track_id"]})
+                elif item.get("youtube_id"):
+                    link_ids.append(iid)
+                    results.append({"id": iid, "outcome": "link"})
+                else:
+                    results.append({"id": iid, "outcome": "skipped"})
+            links = db.save_workspace_links(link_ids) if link_ids else {"added": [], "duplicates": []}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except sqlite3.IntegrityError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"results": results, "saved_tracks": saved_tracks,
+            "saved_link_count": len(links.get("added", [])), "duplicate_link_count": len(links.get("duplicates", []))}
 
 
 def _workspace_run_view(run_id):
@@ -771,6 +854,25 @@ def _downloaded_ids():
     return ids
 
 
+def _download_root_nc():
+    """Normcased download-folder path for containment checks, or None."""
+    try:
+        root = _safe_download_root()
+    except HTTPException:
+        return None
+    return os.path.normcase(os.path.normpath(root)) if root else None
+
+
+def _is_download_ref(item):
+    """True when a Workspace item's own file ref lives in the download folder — i.e. it
+    is a downloaded file, not an mp3-folder/untracked local file. (A download and a local
+    file are distinct; see CLAUDE.md.)"""
+    if not item.get("relative_path"):
+        return False
+    root_nc = _download_root_nc()
+    return bool(root_nc and os.path.normcase(os.path.normpath(item.get("folder_identity") or "")) == root_nc)
+
+
 @app.get("/api/library")
 def api_library():
     """All tracks, trimmed + tagged with a state, for the browse/list view."""
@@ -891,6 +993,447 @@ def api_task_cancel(task_id: int):
     return {"ok": tasks.request_cancel(task_id)}
 
 
+# ── auto link finding (file ↔ YouTube) ──────────────────────────────────────
+# Reuse the root searcher's ranking (the same score that populated tracks.score at
+# review time) so an auto-found link is judged exactly like a reviewed one. Both floors
+# are Settings-tunable (settings.yt_min_score / local_min_score).
+
+
+def _yt_search(query, n):
+    """Top-n YouTube search hits (full metadata) via `yt-dlp -J ytsearchN:`. Network.
+    Returns a list of entry dicts; [] on any failure. Pulled out so tests can stub it."""
+    if not (query or "").strip():
+        return []
+    cmd = _ytdlp_base() + ["-J", "--no-warnings", f"ytsearch{max(1, n)}:{query}"]
+    cookies = os.path.join(REPO_ROOT, "cookies.txt")
+    if os.path.isfile(cookies):
+        cmd += ["--cookies", cookies]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        data = json.loads(out.stdout)
+    except (subprocess.SubprocessError, OSError, ValueError, TypeError):
+        return []
+    return [e for e in (data.get("entries") or []) if e]
+
+
+def _entry_meta(entry):
+    return {"health": "ok", "title": entry.get("title"),
+            "channel": entry.get("channel") or entry.get("uploader"),
+            "view_count": entry.get("view_count"), "duration": entry.get("duration")}
+
+
+def _best_yt_entry(artist, title, exclude=()):
+    """Search YouTube for (artist, title), score hits with the review ranker, and
+    return the highest-scoring entry not in `exclude` (and above the floor), else None."""
+    import searcher  # repo-root script; heavy deps (rapidfuzz/pykakasi) load lazily
+    query = " ".join(t for t in (artist, title) if t).strip()
+    best, best_score = None, None
+    for entry in _yt_search(query, settings.search_top_n()):
+        yid = entry.get("id")
+        if not yid or yid in exclude:
+            continue
+        try:
+            s = searcher.score(entry, artist or "", title or "")
+        except Exception:
+            continue
+        if best_score is None or s > best_score:
+            best, best_score = entry, s
+    if best is None or best_score < settings.yt_min_score():
+        return None
+    return best
+
+
+def _track_terms(track):
+    return (track.get("artist") or "", track.get("title") or "")
+
+
+def _item_terms(item):
+    """(artist, title) to search by for a Workspace item. Mirrors the frontend's
+    itemAuthor/itemName fallback so a background find sees the SAME terms the picker
+    does: item columns, then fetched metadata_json, then the linked track (joined in
+    by list_workspace), then the file's tags. Reading columns only (missing the blob)
+    left link-only items with empty terms, so they were skipped as unsearchable."""
+    meta = _item_metadata(item)
+    artist = item.get("channel") or meta.get("channel") or item.get("track_artist") or ""
+    title = item.get("title") or meta.get("title") or item.get("track_title") or ""
+    if not (artist or title) and item.get("relative_path"):
+        # Read tags off the file itself (its own path), so out-of-folder staged files
+        # (e.g. a download in e:\music\downloads) get their real artist/title too, not
+        # only catalog-indexed files.
+        tags = _read_audio_tags(os.path.join(item.get("folder_identity") or "", item["relative_path"]))
+        artist, title = tags.get("tag_artist") or "", tags.get("tag_title") or ""
+    if not title:
+        # Last resort, matching the frontend's itemName: the file's own name (no
+        # extension). A tagless local file (Cabo da Roca.m4a) is still searchable.
+        stem = item.get("track_filename") or os.path.basename(item.get("relative_path") or "")
+        title = os.path.splitext(stem)[0]
+    return (artist, title)
+
+
+def _item_has_valid_local(item):
+    """A local file the item points to that still exists. Direct file refs are checked
+    on disk (they may have been moved/renamed/deleted); track-linked files trust the
+    catalog's availability flag (local_count)."""
+    if item.get("folder_identity") and item.get("relative_path"):
+        if os.path.isfile(os.path.join(item["folder_identity"], item["relative_path"])):
+            return True
+    return bool(item.get("local_count"))
+
+
+def _item_needs_link(item):
+    return (not item.get("youtube_id")
+            or _item_metadata(item).get("health") in ("dead", "private"))
+
+
+def _has_terms(item):
+    """Anything to search by — stored metadata, a linked track, or file tags. Lets us
+    re-find a link/file from whatever identity the item already carries (metadata, a
+    downloaded video, or a local file), not only from a live local file."""
+    return any(_item_terms(item))
+
+
+def _best_local_record(artist, title):
+    """Highest name-overlap catalog file for (artist, title), or None below the floor.
+    ponytail: penalized partial-ratio over basenames; swap for tag/fingerprint if it misfires."""
+    import searcher
+    name = " ".join(t for t in (artist, title) if t).strip()
+    if not name:
+        return None
+    best, best_score = None, None
+    for rec in _CATALOG.records:
+        s = searcher.penalized_partial_ratio(name, rec.get("basename") or "")
+        if best_score is None or s > best_score:
+            best, best_score = rec, s
+    if best is None or best_score < settings.local_min_score():
+        return None
+    return best
+
+
+class FindYoutube(BaseModel):
+    track_id: PositiveInt
+
+
+@app.post("/api/review/find-youtube")
+def api_review_find_youtube(req: FindYoutube):
+    """Find a *different* YouTube link for one track (Review's "find another"): search,
+    skip rejected ids and the current one, apply the best hit as an unreviewed candidate."""
+    conn = db.connect()
+    try:
+        track = conn.execute("SELECT id, artist, title, yt_id FROM tracks WHERE id=?",
+                            (req.track_id,)).fetchone()
+    finally:
+        conn.close()
+    if track is None:
+        raise HTTPException(status_code=404, detail="track not found")
+    exclude = db.rejected_yt_ids(req.track_id) | ({track["yt_id"]} if track["yt_id"] else set())
+    best = _best_yt_entry(track["artist"] or "", track["title"] or "", exclude)
+    if best is None:
+        raise HTTPException(status_code=404, detail="no new YouTube match found")
+    try:
+        with jobs.curation_write_guard():
+            db.apply_track_yt(req.track_id, best["id"], _entry_meta(best))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return api_track(req.track_id)
+
+
+class FindScope(BaseModel):
+    ids: list[PositiveInt] | None = None
+
+
+@app.post("/api/tasks/find-youtube/workspace")
+def api_task_find_youtube_workspace(req: FindScope):
+    """Background: for selected Workspace items with no live YouTube link but something
+    to search by (metadata, a downloaded video, or a linked local file), auto-find and
+    apply the best-scoring link (paced, cancellable)."""
+    items = db.list_workspace()
+    targets = [it for it in items if _item_needs_link(it) and _has_terms(it)]
+    if req.ids is not None:
+        wanted = set(req.ids)
+        targets = [it for it in targets if it["id"] in wanted]
+    by_id = {it["id"]: it for it in targets}
+
+    def do_one(item_id):
+        item = by_id[item_id]
+        artist, title = _item_terms(item)
+        exclude = db.rejected_yt_ids(item["track_id"]) if item.get("track_id") else set()
+        best = _best_yt_entry(artist, title, exclude)
+        if best is None:
+            return False
+        db.set_workspace_youtube(item_id, best["id"], _entry_meta(best))
+        return True
+
+    try:
+        return tasks.run("workspace-find-youtube", "Find YouTube links",
+                         list(by_id), do_one, delay=settings.task_delay(), noun="found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/api/tasks/find-local/workspace")
+def api_task_find_local_workspace(req: FindScope):
+    """Background: for selected Workspace items whose local file is missing (never had
+    one, or it was moved/renamed/deleted) but that carry something to search by, auto-link
+    the best name-matching catalog file. Local-only (no network pacing)."""
+    _refresh_catalog()   # see files added since startup before matching
+    items = db.list_workspace()
+    targets = [it for it in items if not _item_has_valid_local(it) and _has_terms(it)]
+    if req.ids is not None:
+        wanted = set(req.ids)
+        targets = [it for it in targets if it["id"] in wanted]
+    by_id = {it["id"]: it for it in targets}
+
+    def do_one(item_id):
+        artist, title = _item_terms(by_id[item_id])
+        rec = _best_local_record(artist, title)
+        if rec is None:
+            return False
+        db.set_workspace_file(item_id, rec["folder_identity"], rec["relative_path"])
+        return True
+
+    try:
+        return tasks.run("workspace-find-local", "Find local files",
+                         list(by_id), do_one, delay=(0, 0), noun="found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+# ── interactive search pickers (top-N ranked, user chooses) ──────────────────
+# Unlike the auto-apply tasks above, these return a ranked candidate LIST (with the
+# same review score shown) so the user picks in a modal, then applies their choice.
+_YT_ID_RE = re.compile(r"[a-zA-Z0-9_-]{11}")
+
+
+class YoutubeSearch(BaseModel):
+    query: str
+    artist: str = ""          # scoring target (stays fixed while the user edits `query`)
+    title: str = ""
+    limit: int | None = None  # None -> Settings' SEARCH_RESULT_LIMIT
+
+
+@app.post("/api/search/youtube")
+def api_search_youtube(req: YoutubeSearch):
+    """Top YouTube hits for `query`, each scored by the review ranker against
+    (artist, title) and returned high-to-low. Network."""
+    import searcher
+    limit = settings.search_result_limit() if req.limit is None else max(1, min(req.limit, 50))
+    out = []
+    for e in _yt_search(req.query, limit):
+        yid = e.get("id")
+        if not yid:
+            continue
+        try:
+            s = searcher.score(e, req.artist or "", req.title or "")
+        except Exception:
+            s = 0
+        out.append({"id": yid, "title": e.get("title"),
+                    "channel": e.get("channel") or e.get("uploader"),
+                    "view_count": e.get("view_count"), "duration": e.get("duration"),
+                    "score": round(s)})
+    out.sort(key=lambda r: r["score"], reverse=True)
+    return {"results": out[:limit]}
+
+
+class LocalSearch(BaseModel):
+    query: str
+    limit: int | None = None  # None -> Settings' SEARCH_RESULT_LIMIT
+
+
+@app.post("/api/search/local")
+def api_search_local(req: LocalSearch):
+    """Top catalog files for `query` by name similarity (same primitive as the review
+    ranker), high-to-low. Local-only."""
+    import searcher
+    _refresh_catalog()   # pick up files added since startup (e.g. a just-downloaded track)
+    q = (req.query or "").strip()
+    limit = settings.search_result_limit() if req.limit is None else max(1, min(req.limit, 50))
+    scored = sorted(
+        ((searcher.penalized_partial_ratio(q, rec.get("basename") or ""), rec)
+         for rec in _CATALOG.records),
+        key=lambda t: t[0], reverse=True)
+    results = [{"folder_identity": rec["folder_identity"], "relative_path": rec["relative_path"],
+                "basename": rec["basename"], "score": round(s)} for s, rec in scored[:limit]]
+    return {"results": results}
+
+
+class ApplyYoutube(BaseModel):
+    youtube_id: str
+    title: str | None = None
+    channel: str | None = None
+    view_count: int | None = None
+
+
+def _validate_yt_id(youtube_id):
+    if not _YT_ID_RE.fullmatch(youtube_id or ""):
+        raise HTTPException(status_code=400, detail="invalid YouTube id")
+
+
+@app.post("/api/track/{track_id}/youtube")
+def api_track_set_youtube(track_id: int, req: ApplyYoutube):
+    """Apply a user-chosen YouTube link to a Library track (unreviewed candidate)."""
+    _validate_yt_id(req.youtube_id)
+    try:
+        with jobs.curation_write_guard():
+            db.apply_track_yt(track_id, req.youtube_id,
+                              {"title": req.title, "channel": req.channel, "view_count": req.view_count})
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return api_track(track_id)
+
+
+@app.post("/api/workspace/{item_id}/youtube")
+def api_workspace_set_youtube(item_id: int, req: ApplyYoutube):
+    """Apply a user-chosen YouTube link to a Workspace item."""
+    _validate_yt_id(req.youtube_id)
+    try:
+        db.set_workspace_youtube(item_id, req.youtube_id,
+                                 {"title": req.title, "channel": req.channel, "view_count": req.view_count})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="workspace item not found")
+    return {"ok": True}
+
+
+class ApplyLocal(BaseModel):
+    folder_identity: str | None = None
+    relative_path: str | None = None
+    path: str | None = None          # absolute path (Pick local file) — may be outside folders
+
+
+def _resolve_apply_local(req):
+    """Ref for a file to link: an absolute `path` (registers it as staged so it stays
+    playable/revealable) or a catalog/staged (folder_identity, relative_path). None if
+    it doesn't resolve to an existing file."""
+    if req.path:
+        ref = _ref_for_path(req.path)
+        if ref and not _is_file_tracked(ref["folder_identity"], ref["relative_path"]) and not any(
+                s["folder_identity"] == ref["folder_identity"] and s["relative_path"] == ref["relative_path"]
+                for s in _STAGED_FILES):
+            _STAGED_FILES.append(ref)
+        return ref
+    return _untracked_ref(req.folder_identity, req.relative_path)
+
+
+@app.post("/api/track/{track_id}/local-file")
+def api_track_set_local(track_id: int, req: ApplyLocal):
+    """Link a user-chosen local file (catalog, staged, or a picked absolute path) to a track."""
+    got = _resolve_apply_local(req)
+    if got is None:
+        raise HTTPException(status_code=404, detail="file missing")
+    try:
+        with jobs.curation_write_guard():
+            db.link_file_to_track(track_id, got["folder_identity"], got["relative_path"],
+                                  got["file_size"], got["modified_at"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="track not found")
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return api_track(track_id)
+
+
+@app.post("/api/workspace/{item_id}/local-file")
+def api_workspace_set_local(item_id: int, req: ApplyLocal):
+    """Link a user-chosen local file (catalog, staged, or a picked absolute path) to an item."""
+    got = _resolve_apply_local(req)
+    if got is None:
+        raise HTTPException(status_code=404, detail="file missing")
+    try:
+        db.set_workspace_file(item_id, got["folder_identity"], got["relative_path"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="workspace item not found")
+    return {"ok": True}
+
+
+def _parse_yt_id(value):
+    """Extract an 11-char YouTube id from a raw id or any watch/share/embed/shorts URL."""
+    value = (value or "").strip()
+    if _YT_ID_RE.fullmatch(value):
+        return value
+    m = re.search(r"(?:v=|youtu\.be/|/embed/|/shorts/|/live/)([a-zA-Z0-9_-]{11})", value)
+    return m.group(1) if m else None
+
+
+class ResolveYoutube(BaseModel):
+    value: str                       # pasted id or URL
+    artist: str = ""
+    title: str = ""
+
+
+@app.post("/api/resolve/youtube")
+def api_resolve_youtube(req: ResolveYoutube):
+    """Verify a pasted id/URL: resolve health via yt-dlp and score it against the row's
+    (artist, title), so the UI can show the match before the user confirms. Network."""
+    import searcher
+    yid = _parse_yt_id(req.value)
+    if not yid:
+        raise HTTPException(status_code=400, detail="not a valid YouTube id or URL")
+    meta = _resolve_yt_metadata(yid)
+    entry = {"id": yid, "title": meta.get("title"), "uploader": meta.get("channel"),
+             "view_count": meta.get("view_count")}
+    try:
+        score = round(searcher.score(entry, req.artist or "", req.title or ""))
+    except Exception:
+        score = 0
+    return {"id": yid, "alive": meta.get("health") == "ok", "health": meta.get("health"),
+            "title": meta.get("title"), "channel": meta.get("channel"),
+            "view_count": meta.get("view_count"), "score": score}
+
+
+class ScoreLocal(BaseModel):
+    path: str
+    artist: str = ""
+    title: str = ""
+
+
+@app.post("/api/score/local")
+def api_score_local(req: ScoreLocal):
+    """Verify a picked absolute path exists and score its name against (artist, title),
+    so the UI can show the match before the user confirms setting it. Local-only."""
+    import searcher
+    ref = _ref_for_path(req.path)
+    if ref is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    target = " ".join(t for t in (req.artist, req.title) if t).strip()
+    score = round(searcher.penalized_partial_ratio(target, ref["basename"])) if target else 0
+    return {"exists": True, "basename": ref["basename"], "path": os.path.abspath(req.path),
+            "folder_identity": ref["folder_identity"], "relative_path": ref["relative_path"],
+            "score": score}
+
+
+class FieldPatch(BaseModel):
+    fields: dict
+
+
+@app.patch("/api/track/{track_id}")
+def api_track_patch(track_id: int, req: FieldPatch):
+    """Edit whitelisted Library-track metadata (Info modal). Non-editable columns and the
+    file identity are ignored; a set yt_id must be a valid 11-char id."""
+    yt = req.fields.get("yt_id")
+    if yt and not _YT_ID_RE.fullmatch(yt):
+        raise HTTPException(status_code=400, detail="invalid yt_id")
+    try:
+        with jobs.curation_write_guard():
+            db.update_track_fields(track_id, req.fields)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="no editable fields")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="track not found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return api_track(track_id)
+
+
+@app.patch("/api/workspace/{item_id}")
+def api_workspace_patch(item_id: int, req: FieldPatch):
+    """Edit whitelisted Workspace-item metadata (Info modal)."""
+    try:
+        db.update_workspace_fields(item_id, req.fields)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="no editable fields")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="workspace item not found")
+    return {"ok": True}
+
+
 @app.get("/api/history")
 def api_history(limit: int = 200):
     """The append-only approve/reject decision log (Activity › History)."""
@@ -1005,7 +1548,7 @@ def _target_state(targets):
 
 def _new_token(kind, payload):
     token = secrets.token_urlsafe(24)
-    _DELETE_TOKENS[token] = {"kind": kind, "expires": time.time() + _DELETE_TOKEN_TTL, **payload}
+    _DELETE_TOKENS[token] = {"kind": kind, "expires": time.time() + settings.delete_token_ttl(), **payload}
     return token
 
 
@@ -1021,7 +1564,7 @@ def api_library_delete_preview(req: DeleteTracksReq):
     targets = _delete_targets(req.track_ids)
     state = _target_state(targets)
     token = _new_token("library-delete", {"track_ids": list(req.track_ids), "state": state})
-    return {"token": token, "expires_in": _DELETE_TOKEN_TTL,
+    return {"token": token, "expires_in": settings.delete_token_ttl(),
             "targets": [{k: item[k] for k in ("track_id", "folder_identity", "relative_path", "file_size", "modified_at")}
                         for item in state]}
 
@@ -1103,21 +1646,21 @@ class LocalFilesAdd(BaseModel):
 
 @app.post("/api/library/add-files")
 def api_library_add_files(req: LocalFilesAdd):
-    """Turn untracked local files into Library entries (find-or-create a track,
-    then link the file). Bulk; returns a per-file result."""
+    """Turn untracked files (catalog or staged out-of-folder) into Library entries
+    (find-or-create a track, then link the file). Bulk; returns a per-file result."""
     results = []
     try:
         with jobs.curation_write_guard():
             for ref in req.files:
-                record = _record_for_ref(ref.folder_identity, ref.relative_path)
-                if record is None or not os.path.isfile(record["path"]):
+                got = _untracked_ref(ref.folder_identity, ref.relative_path)
+                if got is None:
                     results.append({"relative_path": ref.relative_path, "added": False,
-                                    "reason": "file not in catalog"})
+                                    "reason": "file missing"})
                     continue
                 try:
                     out = db.add_local_file_to_library(
-                        ref.folder_identity, ref.relative_path, record["basename"],
-                        record.get("file_size"), record.get("modified_at"))
+                        got["folder_identity"], got["relative_path"], got["basename"],
+                        got["file_size"], got["modified_at"])
                     results.append({"relative_path": ref.relative_path, "added": True, **out})
                 except ValueError as e:
                     results.append({"relative_path": ref.relative_path, "added": False, "reason": str(e)})
@@ -1134,11 +1677,11 @@ def api_workspace_add_files(req: LocalFilesAdd):
     try:
         with jobs.curation_write_guard():
             for ref in req.files:
-                record = _record_for_ref(ref.folder_identity, ref.relative_path)
-                if record is None or not os.path.isfile(record["path"]):
-                    results.append({"relative_path": ref.relative_path, "added": False, "reason": "file not in catalog"})
+                got = _untracked_ref(ref.folder_identity, ref.relative_path)
+                if got is None:
+                    results.append({"relative_path": ref.relative_path, "added": False, "reason": "file missing"})
                     continue
-                item = db.add_workspace_file(ref.folder_identity, ref.relative_path)   # title null -> tags/basename win
+                item = db.add_workspace_file(got["folder_identity"], got["relative_path"])   # title null -> tags/basename win
                 results.append({"relative_path": ref.relative_path, "added": True, "workspace_item_id": item["id"]})
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -1192,6 +1735,9 @@ def api_reveal(req: RevealRef):
         elif req.folder_identity and req.relative_path:
             record = _record_for_ref(req.folder_identity, req.relative_path)
         path = _safe_delete_record(record) if record is not None else None
+        if not path and req.folder_identity and req.relative_path:
+            ref = _untracked_ref(req.folder_identity, req.relative_path)   # staged out-of-folder file
+            path = ref["path"] if ref else None
     if not path:
         raise HTTPException(status_code=404, detail="file missing or unsafe")
     # explorer.exe parses its own command line; the list form mis-parses and it
@@ -1226,16 +1772,98 @@ def api_download_delete(req: DownloadDelete):
 
 @app.get("/api/local-audio")
 def api_local_audio(folder_identity: str, relative_path: str):
-    """Serve an untracked catalog file read-only (preview). Containment + reparse
-    validated via the same safe-path resolver used for deletion."""
-    record = _record_for_ref(folder_identity, relative_path)
-    if record is None:
-        raise HTTPException(status_code=404, detail="file not in catalog")
-    path = _safe_delete_record(record)
-    if not path:
+    """Serve an untracked file read-only (preview): a catalog file (containment + reparse
+    validated) or an explicitly-staged out-of-folder file the user picked."""
+    ref = _untracked_ref(folder_identity, relative_path)
+    if ref is None:
         raise HTTPException(status_code=404, detail="local file missing or unsafe")
+    path = ref["path"]
     media_type = _AUDIO_MEDIA_TYPES.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
     return FileResponse(path, media_type=media_type)
+
+
+def _embed_file_path(*, relative_path=None, folder_identity=None, is_download=False,
+                     youtube_id=None, track_id=None, source="local"):
+    """Resolve which file an "Embed metadata" action writes into. `source` picks the
+    file for a row that has both: 'download' -> the download-folder file (the item's own
+    ref if it lives there, else the id-named download); 'local' -> the mp3-folder catalog
+    file (or a staged/untracked file's own path)."""
+    if source == "download":
+        if relative_path:
+            p = os.path.join(folder_identity or "", relative_path)
+            if os.path.isfile(p):
+                return p
+        return _download_file_path(youtube_id) if youtube_id else None
+    if relative_path and not is_download:
+        ref = _untracked_ref(folder_identity, relative_path)
+        if ref:
+            return ref["path"]
+    if track_id:
+        record = _record_for_track(track_id)
+        return _safe_delete_record(record) if record is not None else None
+    return None
+
+
+def _embed_metadata_into(path, artist, title):
+    """Write our best-known artist/title into the file's tags (mutagen easy mode, so only
+    widely-supported tags). Overwrites those two fields; leaves the rest untouched."""
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="file to embed into not found")
+    if not (artist or title):
+        raise HTTPException(status_code=400, detail="no metadata to embed")
+    try:
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(path, easy=True)
+        if audio is None:
+            raise HTTPException(status_code=415, detail="unsupported audio format")
+        if audio.tags is None:
+            audio.add_tags()
+        if artist:
+            audio["artist"] = artist
+        if title:
+            audio["title"] = title
+        audio.save()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"embed failed: {e}")
+    return {"ok": True, "path": path, "artist": artist, "title": title}
+
+
+class EmbedReq(BaseModel):
+    source: str = "local"   # 'local' | 'download'
+
+
+@app.post("/api/workspace/{item_id}/embed")
+def api_workspace_embed(item_id: int, req: EmbedReq):
+    """Embed our metadata into a Workspace item's local or downloaded file."""
+    item = next((it for it in db.list_workspace() if it["id"] == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="workspace item not found")
+    artist, title = _item_terms(item)
+    path = _embed_file_path(relative_path=item.get("relative_path"),
+                            folder_identity=item.get("folder_identity"),
+                            is_download=_is_download_ref(item),
+                            youtube_id=item.get("youtube_id"),
+                            track_id=item.get("track_id"), source=req.source)
+    return _embed_metadata_into(path, artist, title)
+
+
+@app.post("/api/track/{track_id}/embed")
+def api_track_embed(track_id: int, req: EmbedReq):
+    """Embed a Library track's metadata into its local (or downloaded) file."""
+    conn = db.connect()
+    try:
+        row = conn.execute("SELECT artist, title, yt_title, yt_channel, yt_id "
+                           "FROM tracks WHERE id=?", (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="track not found")
+    artist = row["artist"] or row["yt_channel"] or ""
+    title = row["title"] or row["yt_title"] or ""
+    path = _embed_file_path(youtube_id=row["yt_id"], track_id=track_id, source=req.source)
+    return _embed_metadata_into(path, artist, title)
 
 
 class LocalFileMatch(BaseModel):
@@ -1258,6 +1886,130 @@ def api_local_file_match(req: LocalFileMatch):
         raise HTTPException(status_code=409, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+# Files picked from anywhere on disk and added by absolute path (no copy). Import's
+# staged list lives here in process memory: it survives a browser refresh but not a
+# server restart, which is exactly what Import wants (Workspace/Library persist in SQLite).
+_STAGED_FILES = []      # ponytail: process memory by design; a set/db table if it must outlive restarts
+
+
+def _ref_for_path(path):
+    """A file ref for any absolute path (folder identity = its own dir, relative path =
+    its basename). None if the path is not an existing file. No containment requirement:
+    files may live outside the configured mp3 folders — referenced in place, never copied."""
+    try:
+        p = os.path.abspath(path)
+        if not os.path.isfile(p):
+            return None
+        st = os.stat(p)
+    except OSError:
+        return None
+    return {"folder_identity": os.path.dirname(p), "relative_path": os.path.basename(p),
+            "basename": os.path.basename(p), "file_size": st.st_size,
+            "modified_at": str(st.st_mtime_ns), "media_type": "audio",
+            "category": "unmatched", "tracks": []}
+
+
+def _is_file_tracked(folder_identity, relative_path):
+    conn = db.connect()
+    try:
+        return conn.execute(
+            "SELECT 1 FROM track_file_links WHERE folder_identity=? AND relative_path=? "
+            "AND available=1 LIMIT 1", (folder_identity, relative_path)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _staged_path(folder_identity, relative_path):
+    """Absolute path of an explicitly picked (staged) out-of-folder file, or None. These
+    bypass the mp3-folder containment guard precisely because the user hand-picked them:
+    identity must still match a live _STAGED_FILES entry and the file must exist."""
+    for s in _STAGED_FILES:
+        if s["folder_identity"] == folder_identity and s["relative_path"] == relative_path:
+            p = os.path.join(folder_identity, relative_path)
+            return p if os.path.isfile(p) else None
+    return None
+
+
+def _untracked_ref(folder_identity, relative_path):
+    """Resolve an untracked file to a safe abs path + identity — whether it's a catalog
+    file (containment-checked) or an explicitly-staged out-of-folder file. None if it
+    resolves nowhere or is missing. One resolver so staged files are first-class in
+    play/reveal/add, exactly like in-folder untracked files."""
+    record = _record_for_ref(folder_identity, relative_path)
+    if record is not None:
+        path = _safe_delete_record(record)
+        return {"folder_identity": record["folder_identity"], "relative_path": record["relative_path"],
+                "basename": record["basename"], "file_size": record.get("file_size"),
+                "modified_at": record.get("modified_at"), "path": path} if path else None
+    path = _staged_path(folder_identity, relative_path)
+    if not path:
+        return None
+    st = os.stat(path)
+    return {"folder_identity": folder_identity, "relative_path": relative_path,
+            "basename": os.path.basename(path), "file_size": st.st_size,
+            "modified_at": str(st.st_mtime_ns), "path": path}
+
+
+class AddFilesByPath(BaseModel):
+    paths: list[str]
+    target: str        # 'library' | 'workspace' | 'untracked'
+
+
+@app.post("/api/files/add")
+def api_files_add(req: AddFilesByPath):
+    """Add absolute-path files to one destination (DRY entry point for every screen's
+    file picker): 'library' (find-or-create a track), 'workspace' (file-only item), or
+    'untracked' (Import's in-memory staged list, untracked files only)."""
+    if req.target not in ("library", "workspace", "untracked"):
+        raise HTTPException(status_code=400, detail="target must be library, workspace, or untracked")
+    results = []
+
+    def add_one(ref, target):
+        fi, rp = ref["folder_identity"], ref["relative_path"]
+        if target == "untracked":
+            if _is_file_tracked(fi, rp):
+                return False, "already in Library"
+            if any(s["folder_identity"] == fi and s["relative_path"] == rp for s in _STAGED_FILES):
+                return False, "already staged"
+            _STAGED_FILES.append(ref)
+            return True, None
+        if target == "library":
+            try:
+                db.add_local_file_to_library(fi, rp, ref["basename"],
+                                             ref["file_size"], ref["modified_at"])
+            except ValueError as e:
+                return False, str(e)
+            return True, None
+        db.add_workspace_file(fi, rp)      # workspace: file-only item, tracked or not
+        return True, None
+
+    guard = jobs.curation_write_guard() if req.target != "untracked" else contextlib.nullcontext()
+    try:
+        with guard:
+            for path in req.paths:
+                ref = _ref_for_path(path)
+                if ref is None:
+                    results.append({"path": path, "added": False, "reason": "not a file"})
+                    continue
+                added, reason = add_one(ref, req.target)
+                results.append({"path": path, "basename": ref["basename"],
+                                "added": added, "reason": reason})
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"results": results, "added": sum(r["added"] for r in results)}
+
+
+@app.get("/api/files/staged")
+def api_files_staged():
+    """Import's in-memory staged files, re-validated: drop any that vanished or since
+    became tracked. Rendered in the untracked list alongside catalog files."""
+    live = [s for s in _STAGED_FILES
+            if os.path.isfile(os.path.join(s["folder_identity"], s["relative_path"]))
+            and not _is_file_tracked(s["folder_identity"], s["relative_path"])]
+    _STAGED_FILES[:] = live
+    return {"files": live}
 
 
 @app.get("/api/untracked")
@@ -1349,6 +2101,33 @@ def api_pick_folder():
     return {"path": path}
 
 
+def _native_pick_files():
+    """Native multi-file open dialog; returns the chosen absolute paths (localhost).
+    Same subprocess-tkinter approach as the folder picker."""
+    code = (
+        "import tkinter, tkinter.filedialog as fd, sys\n"
+        "r = tkinter.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+        "paths = fd.askopenfilenames(filetypes=["
+        "('Audio','*.mp3 *.flac *.m4a *.opus *.ogg *.aac *.wav *.wma'),('All files','*.*')])\n"
+        "sys.stdout.write('\\n'.join(r.tk.splitlist(paths)))\n"
+    )
+    try:
+        out = subprocess.run([sys.executable, "-c", code],
+                             capture_output=True, text=True, timeout=300)
+    except (subprocess.SubprocessError, OSError):
+        return []
+    if out.returncode != 0:
+        return []
+    return [os.path.normpath(p) for p in out.stdout.splitlines() if p.strip()]
+
+
+@app.post("/api/pick-files")
+def api_pick_files():
+    """Pop the native multi-file picker on the server machine (localhost). Returns the
+    picked absolute paths; the client hands them to /api/files/add with a target."""
+    return {"paths": _native_pick_files()}
+
+
 @app.get("/api/settings")
 def api_settings_get():
     return settings.public_view()
@@ -1376,20 +2155,17 @@ def api_settings_set(s: SettingsIn):
         jobs.release_pipeline("settings_folders")
 
 
-_CLEANUP_EXTENSIONS = (".mp4", ".webm", ".m4a", ".mp4.part", ".webm.part", ".m4a.part",
-                       ".mp4.ytdl", ".webm.ytdl", ".m4a.ytdl")
-
-
 def _cleanup_download_targets():
     folder = _safe_download_root()
     if folder is None:
         return []
+    junk_exts = settings.cleanup_extensions()   # Settings-tunable junk-extension list
     targets = []
     for name in os.listdir(folder):
         path = os.path.join(folder, name)
         if not os.path.isfile(path) or _is_reparse_point(path):
             continue
-        if not (name.endswith(_CLEANUP_EXTENSIONS) or os.path.getsize(path) == 0):
+        if not (name.lower().endswith(junk_exts) or os.path.getsize(path) == 0):
             continue
         info = os.stat(path)
         targets.append({"relative_path": name, "file_size": info.st_size,
@@ -1457,7 +2233,7 @@ def _rewrite_download_checkpoint(ids):
 def api_cleanup_downloads_preview():
     targets = _cleanup_download_targets()
     token = _new_token("cleanup-downloads", {"state": targets})
-    return {"token": token, "expires_in": _DELETE_TOKEN_TTL,
+    return {"token": token, "expires_in": settings.delete_token_ttl(),
             "targets": [{k: item[k] for k in ("relative_path", "file_size", "modified_at")}
                         for item in targets]}
 

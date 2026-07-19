@@ -69,6 +69,7 @@ class ApiTestBase(unittest.TestCase):
         main.AUTO_EXPORT_EVERY = 1000   # effectively off unless a test lowers it
         main._CATALOG = main.FileCatalog((), {})
         main._decision_count = 0
+        main._STAGED_FILES.clear()      # in-memory picked-file store; isolate per test
         settings.save({"MP3_FOLDERS_JSON": [music]})
 
         self.client = TestClient(main.app)
@@ -1106,6 +1107,347 @@ class PickFolderApiTest(ApiTestBase):
             self.assertEqual(self.client.post("/api/pick-folder").status_code, 409)
         finally:
             main._native_pick_folder = orig
+
+
+class FindLinkTest(ApiTestBase):
+    def test_review_find_youtube_excludes_rejected_and_applies_best(self):
+        import searcher
+        tid = self.ids["A.mp3"]
+        # Current link "rej", then reject it -> logged as rejected for this track.
+        db.apply_track_yt(tid, "rej", {"title": "old"})
+        self.assertEqual(self.client.post(
+            "/api/decision", json={"track_id": tid, "decision": False}).status_code, 200)
+        entries = [{"id": "a"}, {"id": "rej"}, {"id": "good"}]
+        scores = {"a": 1, "rej": 9, "good": 5}
+        with mock.patch.object(main, "_yt_search", return_value=entries), \
+             mock.patch.object(searcher, "score", side_effect=lambda e, *a, **k: scores[e["id"]]):
+            r = self.client.post("/api/review/find-youtube", json={"track_id": tid})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["yt_id"], "good")   # "rej" excluded despite top score
+        self.assertIsNone(body["check"])          # applied as unreviewed
+
+    def test_item_terms_reads_metadata_blob_not_only_columns(self):
+        # Regression: link-only items keep title/channel in metadata_json, not the
+        # columns. Reading columns only made background find "found none" (no terms).
+        item = {"title": None, "channel": None, "track_artist": None, "track_title": None,
+                "metadata_json": '{"title": "Song", "channel": "Band"}'}
+        self.assertEqual(main._item_terms(item), ("Band", "Song"))
+        self.assertTrue(main._has_terms(item))
+
+    def test_item_terms_falls_back_to_filename_for_tagless_local(self):
+        # Regression: a tagless/unreadable local file (no columns, metadata, or track)
+        # was unsearchable -> "0 found". Filename stem is the last-resort search term.
+        item = {"relative_path": "Cabo da Roca.m4a", "folder_identity": "/nope"}  # no such file
+        self.assertEqual(main._item_terms(item), ("", "Cabo da Roca"))
+        self.assertTrue(main._has_terms(item))
+
+    def test_item_terms_reads_tags_off_out_of_folder_file(self):
+        # Canaria case: an out-of-folder staged file has no catalog record, but its real
+        # ID3 tags should still drive the search (read off the file's own path).
+        item = {"relative_path": "Canaria.mp3", "folder_identity": "e:\\music\\downloads"}
+        with mock.patch.object(main, "_read_audio_tags",
+                               return_value={"tag_artist": "ReoNa", "tag_title": "Canaria"}):
+            self.assertEqual(main._item_terms(item), ("ReoNa", "Canaria"))
+
+    def test_review_find_youtube_404_when_only_current_link_returned(self):
+        import searcher
+        tid = self.ids["A.mp3"]                    # current yt_id "a"
+        with mock.patch.object(main, "_yt_search", return_value=[{"id": "a"}]), \
+             mock.patch.object(searcher, "score", side_effect=lambda e, *a, **k: 5):
+            r = self.client.post("/api/review/find-youtube", json={"track_id": tid})
+        self.assertEqual(r.status_code, 404)
+
+
+class EmbedMetadataTest(ApiTestBase):
+    def test_download_ref_classified_and_embed_writes_tags(self):
+        import mutagen
+        dl = os.path.join(self.tmp.name, "downloads")
+        os.makedirs(dl)
+        f = os.path.join(dl, "Cabo da Roca.m4a")
+        with open(f, "wb") as fh:
+            fh.write(b"\x00" * 16)
+        settings.save({"DOWNLOAD_FOLDER": dl})
+        # A direct file ref inside the download folder is a *download*, not a local file.
+        item = {"relative_path": "Cabo da Roca.m4a", "folder_identity": dl}
+        self.assertTrue(main._is_download_ref(item))
+        self.assertFalse(main._is_download_ref(
+            {"relative_path": "x.mp3", "folder_identity": os.path.join(self.tmp.name, "music")}))
+
+        # Embed writes artist/title through mutagen easy-mode (only supported tags).
+        tags = {}
+        fake = mock.MagicMock()
+        fake.tags = {}
+        fake.__setitem__.side_effect = tags.__setitem__
+        with mock.patch.object(mutagen, "File", return_value=fake):
+            r = main._embed_metadata_into(f, "DAZBEE", "Cabo da Roca")
+        self.assertEqual(r["ok"], True)
+        self.assertEqual(tags, {"artist": "DAZBEE", "title": "Cabo da Roca"})
+        fake.save.assert_called_once()
+
+    def test_embed_refuses_when_no_metadata(self):
+        f = os.path.join(self.tmp.name, "music", "A.mp3")
+        with self.assertRaises(main.HTTPException) as cm:
+            main._embed_metadata_into(f, "", "")
+        self.assertEqual(cm.exception.status_code, 400)
+
+
+class AddFilesByPathTest(ApiTestBase):
+    def test_add_by_absolute_path_targets_and_staged_untracked(self):
+        extra = os.path.join(self.tmp.name, "outside")   # outside configured mp3 folders
+        os.makedirs(extra)
+        p = os.path.join(extra, "Song.mp3")
+        with open(p, "wb") as f:
+            f.write(b"ID3")
+        # untracked -> in-memory staged, surfaced by /api/files/staged
+        r = self.client.post("/api/files/add", json={"paths": [p], "target": "untracked"}).json()
+        self.assertEqual(r["added"], 1)
+        staged = self.client.get("/api/files/staged").json()["files"]
+        self.assertEqual([s["basename"] for s in staged], ["Song.mp3"])
+        # library -> becomes a track; staged entry then drops (now tracked)
+        self.assertEqual(self.client.post(
+            "/api/files/add", json={"paths": [p], "target": "library"}).json()["added"], 1)
+        self.assertEqual(self.client.get("/api/files/staged").json()["files"], [])
+        # re-staging a now-tracked file is refused
+        again = self.client.post("/api/files/add", json={"paths": [p], "target": "untracked"}).json()
+        self.assertEqual(again["added"], 0)
+        self.assertEqual(again["results"][0]["reason"], "already in Library")
+        # a path that isn't a file is skipped
+        missing = self.client.post("/api/files/add", json={
+            "paths": [os.path.join(extra, "nope.mp3")], "target": "workspace"}).json()
+        self.assertEqual(missing["added"], 0)
+
+    def test_staged_out_of_folder_file_is_first_class(self):
+        extra = os.path.join(self.tmp.name, "outside2")
+        os.makedirs(extra)
+        p = os.path.join(extra, "Tune.mp3")
+        with open(p, "wb") as f:
+            f.write(self.audio_bytes)
+        self.client.post("/api/files/add", json={"paths": [p], "target": "untracked"})
+        s = self.client.get("/api/files/staged").json()["files"][0]
+        # plays despite living outside the configured folders (explicitly staged)
+        audio = self.client.get("/api/local-audio", params={
+            "folder_identity": s["folder_identity"], "relative_path": s["relative_path"]})
+        self.assertEqual(audio.status_code, 200)
+        # row-menu Add-to-Library (ref endpoint) resolves the staged file too
+        r = self.client.post("/api/library/add-files", json={"files": [
+            {"folder_identity": s["folder_identity"], "relative_path": s["relative_path"]}]}).json()
+        self.assertEqual(r["added"], 1)
+        # but an out-of-folder file that was NEVER staged stays refused (guard holds)
+        bogus = os.path.join(extra, "NotStaged.mp3")
+        with open(bogus, "wb") as f:
+            f.write(b"ID3")
+        self.assertEqual(self.client.get("/api/local-audio", params={
+            "folder_identity": extra, "relative_path": "NotStaged.mp3"}).status_code, 404)
+
+    def test_add_by_path_workspace_creates_file_only_item(self):
+        p = os.path.join(self.tmp.name, "ws.mp3")
+        with open(p, "wb") as f:
+            f.write(b"ID3")
+        self.assertEqual(self.client.post(
+            "/api/files/add", json={"paths": [p], "target": "workspace"}).json()["added"], 1)
+        items = self.client.get("/api/workspace").json()["items"]
+        self.assertTrue(any(it.get("relative_path") == "ws.mp3" for it in items))
+
+    def test_save_file_only_item_to_library_creates_and_links_track(self):
+        # Regression: "Save to library" on a file-only item went through save-links (needs
+        # a youtube_id it lacks) and did nothing. It must create a Library track + link it.
+        p = os.path.join(main.MP3_FOLDERS[0], "loose.mp3")   # a configured-folder untracked file
+        with open(p, "wb") as f:
+            f.write(b"ID3")
+        self.client.post("/api/files/add", json={"paths": [p], "target": "workspace"})
+        item = next(it for it in self.client.get("/api/workspace").json()["items"]
+                    if it.get("relative_path") == "loose.mp3")
+        self.assertIsNone(item["track_id"])
+        r = self.client.post("/api/workspace/save-to-library", json={"ids": [item["id"]]})
+        self.assertEqual(r.status_code, 200)
+        res = r.json()["results"][0]
+        self.assertEqual(res["outcome"], "track")
+        after = next(it for it in self.client.get("/api/workspace").json()["items"]
+                     if it["id"] == item["id"])
+        self.assertEqual(after["track_id"], res["track_id"])   # now In Library
+
+    def test_save_untracked_file_with_link_carries_yt_onto_track(self):
+        # The reported bug: an untracked file that ALSO has a youtube link went to
+        # save-links (saving the link, not the file). It must create a track from the file
+        # and carry the link onto it.
+        p = os.path.join(main.MP3_FOLDERS[0], "withlink.mp3")
+        with open(p, "wb") as f:
+            f.write(b"ID3")
+        self.client.post("/api/files/add", json={"paths": [p], "target": "workspace"})
+        item = next(it for it in self.client.get("/api/workspace").json()["items"]
+                    if it.get("relative_path") == "withlink.mp3")
+        self.client.post(f"/api/workspace/{item['id']}/youtube",
+                         json={"youtube_id": "dQw4w9WgXcQ", "title": "T", "channel": "C"})
+        r = self.client.post("/api/workspace/save-to-library", json={"ids": [item["id"]]})
+        self.assertEqual(r.status_code, 200)
+        track = self.client.get(f"/api/track/{r.json()['results'][0]['track_id']}").json()
+        self.assertEqual(track["yt_id"], "dQw4w9WgXcQ")   # link carried onto the new track
+
+    def test_bulk_save_routes_files_and_links_together(self):
+        # Bulk + per-row share the one endpoint: a file item becomes a track, a link-only
+        # item becomes a saved link, in a single mixed call.
+        p = os.path.join(main.MP3_FOLDERS[0], "mixed.mp3")
+        with open(p, "wb") as f:
+            f.write(b"ID3")
+        self.client.post("/api/files/add", json={"paths": [p], "target": "workspace"})
+        file_item = next(it for it in self.client.get("/api/workspace").json()["items"]
+                         if it.get("relative_path") == "mixed.mp3")
+        link_item = self.client.post("/api/workspace/import", json={"text": "zzzzzzzzzzz"}).json()["added"][0]
+        r = self.client.post("/api/workspace/save-to-library",
+                             json={"ids": [file_item["id"], link_item["id"]]})
+        self.assertEqual(r.status_code, 200)
+        outcomes = {res["id"]: res["outcome"] for res in r.json()["results"]}
+        self.assertEqual(outcomes[file_item["id"]], "track")
+        self.assertEqual(outcomes[link_item["id"]], "link")
+
+
+class SearchPickerTest(ApiTestBase):
+    def test_youtube_search_ranks_by_score_high_to_low(self):
+        import searcher
+        entries = [{"id": "aaaaaaaaaaa", "title": "A"}, {"id": "bbbbbbbbbbb", "title": "B"},
+                   {"id": "ccccccccccc", "title": "C"}]
+        scores = {"aaaaaaaaaaa": 1, "bbbbbbbbbbb": 9, "ccccccccccc": 5}
+        with mock.patch.object(main, "_yt_search", return_value=entries), \
+             mock.patch.object(searcher, "score", side_effect=lambda e, *a, **k: scores[e["id"]]):
+            r = self.client.post("/api/search/youtube",
+                                 json={"query": "x", "artist": "a", "title": "t"}).json()
+        self.assertEqual([x["id"] for x in r["results"]], ["bbbbbbbbbbb", "ccccccccccc", "aaaaaaaaaaa"])
+        self.assertEqual(r["results"][0]["score"], 9)
+
+    def test_local_search_returns_ranked_catalog(self):
+        r = self.client.post("/api/search/local", json={"query": "A"}).json()
+        self.assertTrue(any(res["basename"] == "A.mp3" for res in r["results"]))
+        self.assertIn("score", r["results"][0])
+
+    def test_local_search_sees_file_added_after_startup(self):
+        # Regression: catalog is built at startup; a file downloaded into a configured
+        # folder afterward was invisible to Find-local until a manual rescan. The search
+        # now refreshes the catalog first.
+        new = os.path.join(main.MP3_FOLDERS[0], "Freshly Downloaded Song.mp3")
+        with open(new, "wb") as f:
+            f.write(b"ID3")
+        r = self.client.post("/api/search/local", json={"query": "Freshly Downloaded"}).json()
+        self.assertTrue(any(res["basename"] == "Freshly Downloaded Song.mp3" for res in r["results"]))
+
+    def test_apply_chosen_youtube_and_local_to_track(self):
+        tid = self.ids["A.mp3"]
+        r = self.client.post(f"/api/track/{tid}/youtube",
+                             json={"youtube_id": "dQw4w9WgXcQ", "title": "T"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["yt_id"], "dQw4w9WgXcQ")
+        self.assertIsNone(r.json()["check"])                    # applied unreviewed
+        self.assertEqual(self.client.post(f"/api/track/{tid}/youtube",
+                                          json={"youtube_id": "short"}).status_code, 400)
+        # A.mp3's file already belongs to track A; linking it to B is a clean 409.
+        local = self.client.get("/api/local-files").json()["files"][0]
+        bid = self.ids["B.mp3"]
+        self.assertEqual(self.client.post(f"/api/track/{bid}/local-file", json={
+            "folder_identity": local["folder_identity"],
+            "relative_path": local["relative_path"]}).status_code, 409)
+
+    def test_apply_chosen_local_to_workspace_item(self):
+        item = self.client.post("/api/workspace/import", json={"text": "wsvid123456"}).json()["added"][0]
+        local = self.client.get("/api/local-files").json()["files"][0]
+        r = self.client.post(f"/api/workspace/{item['id']}/local-file", json={
+            "folder_identity": local["folder_identity"], "relative_path": local["relative_path"]})
+        self.assertEqual(r.status_code, 200)
+        got = next(it for it in self.client.get("/api/workspace").json()["items"] if it["id"] == item["id"])
+        self.assertEqual(got["relative_path"], local["relative_path"])
+
+
+class ForceSetAndEditTest(ApiTestBase):
+    def test_resolve_youtube_parses_url_scores_and_rejects_garbage(self):
+        import searcher
+        with mock.patch.object(main, "_resolve_yt_metadata",
+                               return_value={"health": "ok", "title": "T", "channel": "C", "view_count": 5}), \
+             mock.patch.object(searcher, "score", return_value=77):
+            r = self.client.post("/api/resolve/youtube",
+                                 json={"value": "https://youtu.be/dQw4w9WgXcQ", "artist": "a", "title": "t"}).json()
+        self.assertEqual(r["id"], "dQw4w9WgXcQ")
+        self.assertTrue(r["alive"])
+        self.assertEqual(r["score"], 77)
+        self.assertEqual(self.client.post("/api/resolve/youtube", json={"value": "garbage"}).status_code, 400)
+
+    def test_score_local_and_set_by_absolute_path_registers_playable(self):
+        extra = os.path.join(self.tmp.name, "force")
+        os.makedirs(extra)
+        p = os.path.join(extra, "Chosen.mp3")
+        with open(p, "wb") as f:
+            f.write(self.audio_bytes)
+        s = self.client.post("/api/score/local", json={"path": p, "artist": "a", "title": "Chosen"}).json()
+        self.assertEqual(s["basename"], "Chosen.mp3")
+        self.assertIn("score", s)
+        item = self.client.post("/api/workspace/import", json={"text": "forcevid123"}).json()["added"][0]
+        self.assertEqual(self.client.post(f"/api/workspace/{item['id']}/local-file",
+                                          json={"path": p}).status_code, 200)
+        got = next(it for it in self.client.get("/api/workspace").json()["items"] if it["id"] == item["id"])
+        self.assertEqual(got["relative_path"], "Chosen.mp3")
+        # the outside file was registered as staged, so it stays playable
+        self.assertEqual(self.client.get("/api/local-audio", params={
+            "folder_identity": got["folder_identity"], "relative_path": "Chosen.mp3"}).status_code, 200)
+
+    def test_patch_track_edits_whitelisted_only(self):
+        tid = self.ids["A.mp3"]
+        r = self.client.patch(f"/api/track/{tid}",
+                              json={"fields": {"artist": "New Artist", "title": "New Title", "check": 9}})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["artist"], "New Artist")
+        self.assertIsNone(r.json()["check"])          # 'check' is not editable — ignored
+        self.assertEqual(self.client.patch(f"/api/track/{tid}",
+                                           json={"fields": {"yt_id": "short"}}).status_code, 400)
+
+    def test_patch_workspace_edits_title_channel(self):
+        item = self.client.post("/api/workspace/import", json={"text": "editvid1234"}).json()["added"][0]
+        r = self.client.patch(f"/api/workspace/{item['id']}",
+                              json={"fields": {"title": "Edited", "channel": "Chan", "position": 999}})
+        self.assertEqual(r.status_code, 200)
+        got = next(it for it in self.client.get("/api/workspace").json()["items"] if it["id"] == item["id"])
+        self.assertEqual((got["title"], got["channel"]), ("Edited", "Chan"))
+
+
+class SettingsGetterTest(unittest.TestCase):
+    def test_search_top_n_and_task_delay_clamp(self):
+        def envget(values):
+            return lambda k, d=None: values.get(k, d)
+        with mock.patch.object(settings, "get", side_effect=envget({"YT_SEARCH_TOP_N": "50"})):
+            self.assertEqual(settings.search_top_n(), 10)       # clamped to ceiling
+        with mock.patch.object(settings, "get",
+                               side_effect=envget({"TASK_DELAY_MIN": "5", "TASK_DELAY_MAX": "2"})):
+            self.assertEqual(settings.task_delay(), (5.0, 5.0))  # max forced >= min
+        with mock.patch.object(settings, "get", side_effect=envget({})):
+            self.assertEqual(settings.search_top_n(), 3)         # defaults
+            self.assertEqual(settings.task_delay(), (1.5, 4.0))
+            self.assertEqual(settings.yt_min_score(), 0)
+            self.assertEqual(settings.local_min_score(), 60)
+
+    def test_min_score_getters(self):
+        def envget(values):
+            return lambda k, d=None: values.get(k, d)
+        with mock.patch.object(settings, "get",
+                               side_effect=envget({"YT_MIN_SCORE": "-20", "LOCAL_MIN_SCORE": "999"})):
+            self.assertEqual(settings.yt_min_score(), -20)       # negatives allowed
+            self.assertEqual(settings.local_min_score(), 100)    # clamped to 0..100
+        with mock.patch.object(settings, "get", side_effect=envget({"LOCAL_MIN_SCORE": "-5"})):
+            self.assertEqual(settings.local_min_score(), 0)
+
+    def test_search_result_limit_and_delete_ttl(self):
+        def envget(values):
+            return lambda k, d=None: values.get(k, d)
+        with mock.patch.object(settings, "get", side_effect=envget({"SEARCH_RESULT_LIMIT": "99", "DELETE_TOKEN_TTL": "2"})):
+            self.assertEqual(settings.search_result_limit(), 50)   # clamped 1..50
+            self.assertEqual(settings.delete_token_ttl(), 5)       # min 5
+        with mock.patch.object(settings, "get", side_effect=envget({})):
+            self.assertEqual(settings.search_result_limit(), 10)
+            self.assertEqual(settings.delete_token_ttl(), 60)
+
+    def test_cleanup_extensions_parse(self):
+        def envget(values):
+            return lambda k, d=None: values.get(k, d)
+        with mock.patch.object(settings, "get", side_effect=envget({"CLEANUP_EXTENSIONS": "MP4, webm .part"})):
+            self.assertEqual(settings.cleanup_extensions(), (".mp4", ".webm", ".part"))
+        with mock.patch.object(settings, "get", side_effect=envget({})):
+            self.assertIn(".webm", settings.cleanup_extensions())   # falls back to defaults
 
 
 if __name__ == "__main__":

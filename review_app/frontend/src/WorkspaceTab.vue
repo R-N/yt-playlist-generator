@@ -5,20 +5,22 @@ import {
   selectedItems, fileDownload, preferredRun, runDismissed, batchSnapshotIds, ACTIVE_RUN_STATUSES,
   duplicateMessage, skippedDuplicateCount,
   itemMeta, isDead, isEnriched, healthLabel, itemTitle, itemName, itemAuthor, formatViews, formatDuration, formatUploadDate,
-  nameMatchScore,
 } from './workspace'
 import { buildLabels, FILTER_ATTRS, matchesLabelFilter } from './labels'
-import { useLabelFilter, usePagination, useSelection, useRowActions, ytUrl, YT_MENU_ITEMS, STATUS_MENU_ITEMS, fileMenuItems } from './curation'
+import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, workspaceLabelMenu, libraryLabelMenu, fileMenuItems, downloadMenuItems, untrackedMenuItems } from './curation'
 import CurationList from './CurationList.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
 import ActionMenu from './ActionMenu.vue'
 import InfoDialog from './InfoDialog.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
+import SearchPickerDialog from './SearchPickerDialog.vue'
+import ForceSetDialog from './ForceSetDialog.vue'
+import InfoEditDialog from './InfoEditDialog.vue'
 import VerifyScopeDialog from './VerifyScopeDialog.vue'
 
 // Workspace items can't be saved-links or untracked files — hide those attrs.
 const WS_FILTER_ATTRS = FILTER_ATTRS.filter((attr) => !['saved', 'untracked'].includes(attr.key))
-const FILE_MENU_ITEMS = fileMenuItems()   // Workspace does not manage deletion, so no delete row
-import { activeTab, invalidateData, reviewTrack, showInLibrary, useTabRefresh } from './nav'
+import { activeTab, invalidateData, reviewTrack, showInLibrary, workspaceFocusIds, useTabRefresh } from './nav'
 
 const items = ref([])
 const batches = ref([])
@@ -29,6 +31,7 @@ const verifying = ref(false)
 const verifyDialog = ref(false)
 const startingVerify = ref(false)
 const error = ref('')
+const notice = ref('')
 const run = ref(null)
 const batchIds = ref([])
 const batchDuplicates = ref(0)
@@ -40,24 +43,52 @@ const query = ref('')
 const { labelFilter, activeFilterCount, cycleFilter } = useLabelFilter()
 const sortBy = ref('added')       // added | title | views
 const finding = ref('')
-const findLocalOpen = ref(false)
-const findLocalResults = ref([])
-const findYtOpen = ref(false)
-const findYtItems = ref([])
-const ytMenu = ref({ open: false, target: [0, 0], row: null })
-const fileMenu = ref({ open: false, target: [0, 0], row: null })
+const ytMenu = ref({ open: false, target: [0, 0], row: null, items: YT_MENU_ITEMS })
+const fileMenu = ref({ open: false, target: [0, 0], row: null, items: [] })
+const downloadMenu = ref({ open: false, target: [0, 0], row: null, items: [] })
+const untrackedMenu = ref({ open: false, target: [0, 0], row: null, items: [] })
 const statusMenu = ref({ open: false, target: [0, 0], row: null })
+const memberMenu = ref({ open: false, target: [0, 0], label: null, items: [] })
+const libRemoveConfirm = ref(null)   // { trackId } pending confirm (removing from Library is destructive)
 // Shared action logic (curation.js). Rows carry the entity-specific data below.
 const { preview, fileInfo, ytAction, fileAction, statusAction } = useRowActions({
   onError: (e) => { error.value = String(e) },
+  onNotice: (m) => { notice.value = m },
   openReview: async (row) => { try { reviewTrack(await api.track(row.trackId)) } catch (e) { error.value = String(e) } },
 })
+// Membership-label actions (In Library / In Workspace). Remove-from-library confirms;
+// remove-from-workspace is the item's own removal (non-destructive to files).
+const membership = useMembershipActions({
+  onError: (e) => { error.value = String(e) },
+  reload: load,
+  removeLibrary: (trackId) => { libRemoveConfirm.value = { trackId } },
+  removeWorkspace: (itemId) => removeItems([itemId]),
+})
+// Interactive "Find on YouTube" / "Find local file" pickers (see SearchPickerDialog).
+const { picker, openYoutube, openLocal, onPick } = useSearchPicker({
+  onError: (e) => { error.value = String(e) }, reload: load,
+})
+// Force-set: "Set YouTube link…" / "Pick local file…" (verify + confirm w/ score).
+const { fset, openSetYoutube, pickLocalFile, apply: applyForceSet, setValue: setForceValue } = useForceSet({
+  onError: (e) => { error.value = String(e) }, reload: load,
+})
+const entityFor = (item) => ({ kind: 'workspace', id: item.id, artist: itemAuthor(item), title: itemName(item) })
+const info = ref({ open: false, title: '', data: {}, editable: [] })
+function openInfo(row) { info.value = { open: true, title: itemTitle(row.raw), data: row.raw, editable: ['title', 'channel'] } }
+async function saveInfo(fields) {
+  try { await api.workspacePatch(info.value.data.id, fields); info.value.open = false; invalidateData(); await load() }
+  catch (e) { error.value = String(e) }
+}
 
 const liveItems = computed(() => items.value.filter((item) => !isDead(item)))
 const { selected, allSelected, toggle, toggleAll } = useSelection(computed(() => liveItems.value.map((item) => item.id)))
 const chosen = computed(() => selectedItems(items.value, selected.value))
 const busy = computed(() => !chosen.value.length || !!working.value)
 const displayItems = computed(() => {
+  if (workspaceFocusIds.value?.length) {          // "Show in Workspace" isolates these ids
+    const ids = new Set(workspaceFocusIds.value)
+    return items.value.filter((item) => ids.has(item.id))
+  }
   const q = query.value.trim().toLowerCase()
   let list = items.value.filter((item) =>
     matchesLabelFilter(new Set(labelsFor(item).map((label) => label.key)), labelFilter.value) &&
@@ -66,7 +97,7 @@ const displayItems = computed(() => {
   else if (sortBy.value === 'views') list = [...list].sort((a, b) => (itemMeta(b).view_count || 0) - (itemMeta(a).view_count || 0))
   return list
 })
-const { page, perPage, pageCount, paged: pagedItems } = usePagination(displayItems, [labelFilter, query, sortBy])
+const { page, perPage, pageCount, paged: pagedItems } = usePagination(displayItems, [labelFilter, query, sortBy, workspaceFocusIds])
 // Normalize the visible page into the shared CurationList row shape + the
 // action contract useRowActions reads (ytUrl/ytId/trackId/setCheck/…).
 const listRows = computed(() => pagedItems.value.map((item) => ({
@@ -78,10 +109,16 @@ const listRows = computed(() => pagedItems.value.map((item) => ({
   ytUrl: ytUrl(item), ytId: item.youtube_id,
   trackId: item.track_id || null,
   setCheck: (v) => { item.track_check = v },
-  fileSrc: wsLocalSrc(item), downloadSrc: null,
-  revealArg: () => item.relative_path
-    ? { folder_identity: item.folder_identity, relative_path: item.relative_path }
-    : { track_id: item.track_id },
+  embed: (source) => api.workspaceEmbed(item.id, source),
+  fileSrc: wsLocalSrc(item),
+  downloadSrc: item.is_download_file
+    ? api.localAudioUrl(item.folder_identity, item.relative_path)
+    : (item.youtube_id ? api.downloadAudioUrl(item.youtube_id) : null),
+  revealArg: (source) => (source === 'download' && !item.is_download_file)
+    ? { download_yt_id: item.youtube_id }
+    : (item.relative_path
+      ? { folder_identity: item.folder_identity, relative_path: item.relative_path }
+      : { track_id: item.track_id }),
   infoFor: () => item.relative_path
     ? { title: 'File info', lines: [['File', item.relative_path.split(/[\\/]/).pop()], ['Path', item.relative_path]] }
     : { title: 'File info', lines: [['File', item.track_filename || '—'], ['Artist', item.track_artist || '—'], ['Title', item.track_title || '—'], ['Local files', String(item.local_count || 0)]] },
@@ -152,8 +189,12 @@ async function removeItems(ids) {
   try { await api.workspaceRemove(ids); selected.value = selected.value.filter((id) => !ids.includes(id)); invalidateData(); await load() }
   catch (e) { error.value = String(e) }
 }
+// "Save to library" for one row or the whole selection — the server routes each item
+// (file -> track, link -> saved link), so per-row and bulk are the exact same call.
 async function saveToLibrary(ids = selected.value) {
-  await act('Saving', async () => { await api.workspaceSaveLinks(ids); invalidateData() })
+  if (!ids.length) return
+  await act('Saving', async () => { await api.workspaceSaveToLibrary(ids); invalidateData() })
+  await load()
 }
 async function generatePlaylist() {
   await act('Generating playlist', async () => {
@@ -186,10 +227,18 @@ async function startDownload() {
   })
 }
 function labelsFor(item) {
+  // A file ref in the download folder is a *download*, not an mp3-folder local/untracked
+  // file (distinct — see CLAUDE.md). A direct file ref is "untracked" only when it has NO
+  // Library track (a loose/staged file); once it's linked to a track (track_id) it's that
+  // track's local file, never untracked. A catalog-linked file (local_count) is local too.
+  const dlFile = !!item.is_download_file
+  const directFile = !!item.relative_path && !dlFile
   return buildLabels({
     aliveLink: isEnriched(item) && !isDead(item), deadLink: isDead(item),
-    localCount: item.local_count || (item.relative_path ? 1 : 0),
-    untracked: !!item.relative_path, check: item.track_check,
+    localCount: item.local_count || (directFile ? 1 : 0),
+    untracked: directFile && !item.track_id && !item.local_count,
+    downloaded: !!item.downloaded, check: item.track_check,
+    ytId: item.youtube_id, inLibrary: item.track_id || null, inWorkspace: item.id,
   })
 }
 function wsLocalSrc(item) {
@@ -201,30 +250,52 @@ function wsLocalSrc(item) {
 // rereview routes through openReview above — both fixed once in useRowActions.
 function onLabel(row, label, ev) {
   const target = [ev.clientX, ev.clientY]
-  if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, row }
-  else if (label.key === 'local' || label.key === 'untracked') fileMenu.value = { open: true, target, row }
+  const item = row.raw
+  if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, row, items: ytMenuItems(row.ytId, { canFindLocal: !(item.relative_path || item.local_count), canSetLocal: true }) }
+  else if (label.key === 'local') fileMenu.value = { open: true, target, row, items: fileMenuItems({ canFindYoutube: !row.ytId, canSetYoutube: true, canEmbed: true }) }
+  else if (label.key === 'untracked') untrackedMenu.value = { open: true, target, row, items: untrackedMenuItems({ canSend: false }) }
+  else if (label.key === 'downloaded') downloadMenu.value = { open: true, target, row, items: downloadMenuItems() }
   else if (label.key === 'confirmed' || label.key === 'rejected') statusMenu.value = { open: true, target, row }
+  else if (label.key === 'inlibrary') memberMenu.value = { open: true, target, label, row, items: libraryLabelMenu({ trackId: label.trackId, onScreen: 'workspace', inWorkspace: true }) }
+  else if (label.key === 'inworkspace') memberMenu.value = { open: true, target, label, row, items: workspaceLabelMenu({ onScreen: 'workspace', inLibrary: !!row.trackId }) }
 }
-function itemSearchName(item) { return itemMeta(item).title || itemTitle(item) || item.youtube_id }
-async function findLocal() {
-  finding.value = 'local'; error.value = ''
+function onFileMenu(mode, row) {
+  if (mode === 'find-youtube') openYoutube({ title: itemTitle(row.raw), artist: itemAuthor(row.raw), songTitle: itemName(row.raw), target: { kind: 'workspace', id: row.key } })
+  else if (mode === 'set-youtube') openSetYoutube(entityFor(row.raw))
+  else fileAction(mode, row)
+}
+const onDownloadMenu = (mode, row) => fileAction(mode, row, 'download')
+function onYtMenu(mode, row) {
+  if (mode === 'find-local') openLocal({ title: itemTitle(row.raw), query: itemName(row.raw), target: { kind: 'workspace', id: row.key } })
+  else if (mode === 'pick-local') pickLocalFile(entityFor(row.raw))
+  else ytAction(mode, row)
+}
+function onMemberMenu(mode) {
+  if (mode === 'info') openInfo(memberMenu.value.row)
+  else membership.run(mode, memberMenu.value.label)   // save-library routes to the unified endpoint
+}
+function onUntrackedMenu(mode, row) {
+  if (mode === 'add') saveToLibrary([row.key])   // "Send to Workspace" is hidden here (already in Workspace)
+}
+// Both fire a paced background task over the selection (one active task at a time,
+// tracked in Activity), auto-applying the best match — see tasks.py.
+async function startFind(kind, fn) {
+  finding.value = kind; error.value = ''
   try {
-    const files = (await api.localFiles()).files
-    findLocalResults.value = chosen.value.map((item) => ({
-      item, matches: files
-        .map((file) => ({ file, score: nameMatchScore(itemSearchName(item), file.basename) }))
-        .filter((match) => match.score >= 2)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 5),
-    }))
-    findLocalOpen.value = true
-  } catch (e) { error.value = String(e) } finally { finding.value = '' }
+    await fn(selected.value.length ? selected.value : null)
+    activeTab.value = 'activity'
+  } catch (e) {
+    error.value = e.message?.includes('409') ? 'A background task is already running (see Activity).' : String(e)
+  } finally { finding.value = '' }
 }
-function findYoutube() {
-  findYtItems.value = chosen.value.filter((item) => isDead(item) || !item.youtube_id)
-  findYtOpen.value = true
-}
-function ytSearchUrl(item) { return 'https://www.youtube.com/results?search_query=' + encodeURIComponent(itemSearchName(item)) }
+const findLocal = () => startFind('local', api.findLocalWorkspaceTask)
+const findYoutube = () => startFind('youtube', api.findYoutubeWorkspaceTask)
+// Add absolute-path files as Workspace items (tracked or untracked); shared picker.
+const { picking, pickFiles } = useFilePicker({
+  target: 'workspace',
+  onDone: async () => { invalidateData(); await load() },
+  onError: (e) => { error.value = String(e) },
+})
 async function act(label, fn) {
   working.value = label; error.value = ''
   try { await fn() } catch (e) { error.value = String(e) }
@@ -279,20 +350,27 @@ onUnmounted(() => clearInterval(poll))
   <v-alert v-if="exportDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Download', exportDuplicates) }}</v-alert>
   <v-alert v-if="runDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Audio download', runDuplicates) }}</v-alert>
   <v-alert v-if="error" type="error" closable class="mb-4" @click:close="error=''">{{ error }}</v-alert>
+  <v-alert v-if="notice" type="success" variant="tonal" closable class="mb-4" @click:close="notice=''">{{ notice }}</v-alert>
+  <v-alert v-if="workspaceFocusIds" type="info" variant="tonal" class="mb-3">
+    <div class="d-flex align-center">Showing {{ workspaceFocusIds.length }} focused item(s).<v-spacer /><v-btn size="small" variant="text" prepend-icon="mdi-close" @click="workspaceFocusIds = null">Clear</v-btn></div>
+  </v-alert>
 
   <v-toolbar density="comfortable" class="mb-3 px-2 rounded-lg" color="surface" border>
     <v-checkbox-btn :model-value="allSelected" aria-label="Select all live items" @update:model-value="toggleAll" />
     <v-btn icon variant="text" :loading="loading" aria-label="Refresh" @click="load">
       <v-icon>mdi-refresh</v-icon><v-tooltip activator="parent" location="bottom">Refresh list</v-tooltip>
     </v-btn>
+    <v-btn icon variant="text" :loading="picking" aria-label="Add files" @click="pickFiles">
+      <v-icon>mdi-file-plus-outline</v-icon><v-tooltip activator="parent" location="bottom">Add files from disk (absolute path)</v-tooltip>
+    </v-btn>
     <v-btn icon variant="text" :loading="startingVerify" aria-label="Verify links" @click="verifyDialog = true">
       <v-icon>mdi-link-variant</v-icon><v-tooltip activator="parent" location="bottom">Verify links (background task)</v-tooltip>
     </v-btn>
     <v-btn icon variant="text" :loading="finding === 'local'" :disabled="busy" aria-label="Find local file" @click="findLocal">
-      <v-icon>mdi-folder-search-outline</v-icon><v-tooltip activator="parent" location="bottom">Find local file</v-tooltip>
+      <v-icon>mdi-folder-search-outline</v-icon><v-tooltip activator="parent" location="bottom">Find local file — missing/moved, auto-link (background)</v-tooltip>
     </v-btn>
-    <v-btn icon variant="text" :disabled="busy" aria-label="Find YouTube link" @click="findYoutube">
-      <v-icon>mdi-link-variant-plus</v-icon><v-tooltip activator="parent" location="bottom">Find YouTube link (missing/dead)</v-tooltip>
+    <v-btn icon variant="text" :loading="finding === 'youtube'" :disabled="busy" aria-label="Find YouTube link" @click="findYoutube">
+      <v-icon>mdi-link-variant-plus</v-icon><v-tooltip activator="parent" location="bottom">Find YouTube link — missing/dead, auto-apply best (background)</v-tooltip>
     </v-btn>
     <v-btn icon variant="text" :disabled="busy" aria-label="Generate Playlist" @click="generatePlaylist">
       <v-icon>mdi-playlist-play</v-icon><v-tooltip activator="parent" location="bottom">Generate Playlist</v-tooltip>
@@ -341,62 +419,25 @@ onUnmounted(() => clearInterval(poll))
     <template #badge="{ row }">
       <v-icon v-if="itemMeta(row.raw).verified" size="12" class="ml-1 text-medium-emphasis" title="Verified channel">mdi-check-decagram</v-icon>
     </template>
-    <template #actions="{ row }">
-      <v-menu>
-        <template #activator="{ props }">
-          <v-btn icon="mdi-dots-vertical" size="small" variant="text" aria-label="Item actions" v-bind="props" />
-        </template>
-        <v-list density="compact" min-width="180">
-          <v-list-item prepend-icon="mdi-bookmark-plus-outline" title="Save to Library" @click="saveToLibrary([row.key])" />
-          <v-list-item v-if="row.raw.track_id" prepend-icon="mdi-library" title="Show in library" @click="showInLibrary([row.raw.track_id])" />
-          <v-list-item prepend-icon="mdi-delete-outline" title="Remove" base-color="error" @click="removeItems([row.key])" />
-        </v-list>
-      </v-menu>
-    </template>
     <template #empty>
       <v-empty-state icon="mdi-youtube-play" title="Workspace is empty" text="Open Import to add YouTube IDs, or send exact tracks from Library." action-text="Open Import" @click:action="activeTab = 'import'" />
     </template>
   </CurationList>
 
-  <ActionMenu v-model="ytMenu.open" :target="ytMenu.target" :items="YT_MENU_ITEMS" @select="(mode) => { ytAction(mode, ytMenu.row); ytMenu.open = false }" />
-  <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="FILE_MENU_ITEMS" @select="(mode) => { fileAction(mode, fileMenu.row); fileMenu.open = false }" />
+  <ActionMenu v-model="ytMenu.open" :target="ytMenu.target" :items="ytMenu.items" @select="(mode) => { onYtMenu(mode, ytMenu.row); ytMenu.open = false }" />
+  <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="fileMenu.items" @select="(mode) => { onFileMenu(mode, fileMenu.row); fileMenu.open = false }" />
+  <ActionMenu v-model="downloadMenu.open" :target="downloadMenu.target" :items="downloadMenu.items" @select="(mode) => { onDownloadMenu(mode, downloadMenu.row); downloadMenu.open = false }" />
+  <ActionMenu v-model="untrackedMenu.open" :target="untrackedMenu.target" :items="untrackedMenu.items" @select="(mode) => { onUntrackedMenu(mode, untrackedMenu.row); untrackedMenu.open = false }" />
   <ActionMenu v-model="statusMenu.open" :target="statusMenu.target" :items="STATUS_MENU_ITEMS" @select="(mode) => { statusAction(mode, statusMenu.row); statusMenu.open = false }" />
+  <ActionMenu v-model="memberMenu.open" :target="memberMenu.target" :items="memberMenu.items" @select="(mode) => { onMemberMenu(mode); memberMenu.open = false }" />
+  <SearchPickerDialog v-model="picker.open" :mode="picker.mode" :title="picker.title" :initial-query="picker.query" :artist="picker.artist" :song-title="picker.songTitle" @pick="onPick" />
+  <ForceSetDialog :state="fset" @update:open="fset.open = $event" @update:value="setForceValue" @apply="applyForceSet" />
+  <InfoEditDialog v-model="info.open" :title="info.title" :data="info.data" :editable="info.editable" @save="saveInfo" />
   <InfoDialog v-model="fileInfo" />
   <VerifyScopeDialog v-model="verifyDialog" :busy="startingVerify" @pick="startVerify" />
-
-  <v-dialog v-model="findLocalOpen" max-width="720" scrollable>
-    <v-card>
-      <v-card-title class="d-flex align-center">Find local file<v-spacer /><v-btn icon="mdi-close" variant="text" size="small" aria-label="Close" @click="findLocalOpen = false" /></v-card-title>
-      <v-divider />
-      <v-card-text>
-        <div class="text-caption text-medium-emphasis mb-3">Name-overlap matches in your configured folders. Discovery only — no linking applied yet.</div>
-        <div v-for="row in findLocalResults" :key="row.item.id" class="mb-4">
-          <div class="font-weight-medium">{{ itemTitle(row.item) }}</div>
-          <v-list v-if="row.matches.length" density="compact">
-            <v-list-item v-for="match in row.matches" :key="`${match.file.folder_identity}-${match.file.relative_path}`" :title="match.file.basename" :subtitle="match.file.relative_path" />
-          </v-list>
-          <div v-else class="text-caption text-medium-emphasis">No local file matched.</div>
-        </div>
-        <div v-if="!findLocalResults.length" class="text-medium-emphasis">Select items first.</div>
-      </v-card-text>
-    </v-card>
-  </v-dialog>
-
-  <v-dialog v-model="findYtOpen" max-width="620" scrollable>
-    <v-card>
-      <v-card-title class="d-flex align-center">Find YouTube link<v-spacer /><v-btn icon="mdi-close" variant="text" size="small" aria-label="Close" @click="findYtOpen = false" /></v-card-title>
-      <v-divider />
-      <v-card-text>
-        <div class="text-caption text-medium-emphasis mb-3">Dead links among the selection (alive links skipped). Verify links first if health is unknown.</div>
-        <v-list v-if="findYtItems.length" density="compact" lines="two">
-          <v-list-item v-for="item in findYtItems" :key="item.id" :title="itemTitle(item)" :subtitle="healthLabel(item) || 'No YouTube link'">
-            <template #append><v-btn size="small" variant="tonal" :href="ytSearchUrl(item)" target="_blank" rel="noopener noreferrer" append-icon="mdi-open-in-new">Search YouTube</v-btn></template>
-          </v-list-item>
-        </v-list>
-        <div v-else class="text-medium-emphasis">No dead links in the current selection.</div>
-      </v-card-text>
-    </v-card>
-  </v-dialog>
+  <ConfirmDialog :model-value="!!libRemoveConfirm" title="Remove from Library?" confirm-label="Remove" @update:model-value="(v) => { if (!v) libRemoveConfirm = null }" @confirm="async () => { const id = libRemoveConfirm.trackId; libRemoveConfirm = null; try { await api.libraryRemove([id]); invalidateData(); await load() } catch (e) { error.value = String(e) } }">
+    Deletes the Library entry and any downloaded file(s). Your mp3-folder files are not touched. This item stays in the Workspace.
+  </ConfirmDialog>
 
   <v-dialog v-model="dialog" max-width="760" scrollable>
     <v-card>

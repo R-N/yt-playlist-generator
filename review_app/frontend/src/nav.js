@@ -4,7 +4,7 @@ import { ref, watch } from 'vue'
 
 export const PRIMARY_NAV = [
   { value: 'import', icon: 'mdi-import', label: 'Import', subtitle: 'paste + Discord' },
-  { value: 'workspace', icon: 'mdi-youtube', label: 'Workspace', subtitle: 'YouTube list + batches' },
+  { value: 'workspace', icon: 'mdi-tray-full', label: 'Workspace', subtitle: 'YouTube list + batches' },
   { value: 'library', icon: 'mdi-music-box-multiple', label: 'Library', subtitle: 'tracks + saved links' },
   { value: 'review', icon: 'mdi-check-decagram', label: 'Review', subtitle: 'approve / reject by ear' },
   { value: 'activity', icon: 'mdi-history', label: 'Activity', subtitle: 'tasks + history' },
@@ -50,4 +50,11 @@ export const libraryFocusIds = ref(null)
 export function showInLibrary(ids) {
   libraryFocusIds.value = ids && ids.length ? ids : null
   activeTab.value = 'library'
+}
+
+// Isolate specific Workspace item ids (mirror of showInLibrary, for "Show in Workspace").
+export const workspaceFocusIds = ref(null)
+export function showInWorkspace(ids) {
+  workspaceFocusIds.value = ids && ids.length ? ids : null
+  activeTab.value = 'workspace'
 }

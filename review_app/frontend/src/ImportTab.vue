@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { api } from './api'
 import { invalidateData } from './nav'
 import { parsePaste } from './import'
-import { useSelection, usePagination, useRowActions, fileMenuItems, UNTRACKED_MENU_ITEMS } from './curation'
+import { useSelection, usePagination, useRowActions, useFilePicker, fileMenuItems, untrackedMenuItems } from './curation'
 import { buildLabels } from './labels'
 import CurationList from './CurationList.vue'
 import ActionMenu from './ActionMenu.vue'
@@ -47,9 +47,21 @@ function untrackedAction(mode) {
   else if (mode === 'send') sendFiles(refs)
 }
 async function loadUntracked() {
-  try { untracked.value = (await api.localFiles()).files.filter((file) => !file.tracks?.length) }
-  catch (e) { error.value = String(e) }
+  try {
+    const [files, staged, ws] = await Promise.all([api.localFiles(), api.stagedFiles(), api.workspace()])
+    // A file already staged in Workspace leaves the untracked list (it's been imported).
+    const inWs = new Set(ws.items.filter((it) => it.relative_path).map((it) => `${it.folder_identity}|${it.relative_path}`))
+    const catalog = files.files.filter((file) => !file.tracks?.length && !inWs.has(fkey(file)))
+    const seen = new Set(catalog.map(fkey))
+    untracked.value = [...catalog, ...staged.files.filter((file) => !seen.has(fkey(file)) && !inWs.has(fkey(file)))]
+  } catch (e) { error.value = String(e) }
 }
+// Import stages picked files in server memory as untracked-only (see /api/files/add).
+const { picking, pickFiles } = useFilePicker({
+  target: 'untracked',
+  onDone: (r) => { fileNotice.value = `Staged ${r.added} untracked file${r.added === 1 ? '' : 's'}.`; loadUntracked() },
+  onError: (e) => { error.value = String(e) },
+})
 async function addFiles(refs) {
   if (!refs.length) return
   filesBusy.value = 'add'; error.value = ''; fileNotice.value = ''
@@ -138,6 +150,7 @@ function copy(value) { navigator.clipboard?.writeText(value) }
         <div class="d-flex align-center mb-3 flex-wrap ga-2">
           <div class="text-body-2 text-medium-emphasis">Local files with no Library entry.</div>
           <v-spacer />
+          <v-btn size="small" variant="tonal" :loading="picking" prepend-icon="mdi-file-plus-outline" @click="pickFiles">Add files</v-btn>
           <template v-if="selectedFiles.length">
             <v-chip size="small" variant="tonal">{{ selectedFiles.length }} selected</v-chip>
             <v-btn size="small" icon variant="text" color="primary" :loading="filesBusy === 'add'" aria-label="Add to Library" @click="addFiles(selectedFileRefs)"><v-icon>mdi-plus-box-multiple</v-icon><v-tooltip activator="parent" location="bottom">Add {{ selectedFiles.length }} to Library</v-tooltip></v-btn>
@@ -152,7 +165,7 @@ function copy(value) { navigator.clipboard?.writeText(value) }
           @toggle="(row) => toggle(row.key)" @label="onLabel" />
         <v-empty-state v-else icon="mdi-check-all" title="No untracked files" text="Every local file already has a Library entry." />
         <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="FILE_MENU_ITEMS" @select="(mode) => { fileAction(mode, fileMenu.row); fileMenu.open = false }" />
-        <ActionMenu v-model="untrackedMenu.open" :target="untrackedMenu.target" :items="UNTRACKED_MENU_ITEMS" @select="untrackedAction" />
+        <ActionMenu v-model="untrackedMenu.open" :target="untrackedMenu.target" :items="untrackedMenuItems()" @select="untrackedAction" />
         <InfoDialog v-model="fileInfo" />
       </v-window-item>
     </v-window>
