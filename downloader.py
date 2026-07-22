@@ -26,20 +26,30 @@ downloaded_log_file = "downloaded_ids.txt"
 error_log_file = "error_ids.txt"
 SIGN_IN_FILE = "sign_in.txt"
 sign_in_only = False
-    
+
+# Audio codec is chosen per-run by the review app (Settings/format modal) via env;
+# default keeps the original opus behavior when run standalone. Whitelist guards it.
+AUDIO_FORMAT = os.environ.get("AUDIO_FORMAT") or "opus"
+if AUDIO_FORMAT not in ("opus", "mp3", "m4a"):
+    AUDIO_FORMAT = "opus"
+# Single-item "download again & replace" sets this: re-download even if already logged,
+# and let yt-dlp overwrite the final file (it writes to .part first, so a failed run
+# leaves the old file untouched — replace happens only on success).
+FORCE_REDOWNLOAD = os.environ.get("YT_FORCE_REDOWNLOAD") == "1"
+
 # yt-dlp options
 YDL_OPTS = {
   # "cookiesfrombrowser": ("brave", "Profile 1"),
   # "cookiefile": "cookies.txt",
   'format': 'bestaudio/best',
   'extract_audio': True,
-  'audio_format': 'opus',
+  'audio_format': AUDIO_FORMAT,
   'audio_quality': '160K',
   'outtmpl': os.path.join(download_folder, '%(uploader)s - %(title)s [%(id)s].%(ext)s'),
   'quiet': False,
 #   'verbose': True,
   'noplaylist': True,
-  'overwrites': False,
+  'overwrites': FORCE_REDOWNLOAD,
   'max_filesize': None,  # Not limiting size directly
   'match_filter': lambda info: (
       "Skipping: too long" if info.get('duration', 0) > 1800 else None
@@ -49,7 +59,7 @@ YDL_OPTS = {
   'postprocessors': [
       {
           'key': 'FFmpegExtractAudio',
-          'preferredcodec': 'opus',
+          'preferredcodec': AUDIO_FORMAT,
           'preferredquality': '0',
       },
       {
@@ -125,8 +135,9 @@ def main():
   else:
       downloaded_ids = set()
 
-  # Remaining videos
-  to_download = [vid for vid in all_ids if vid not in downloaded_ids]
+  # Remaining videos (FORCE re-downloads everything, ignoring the completed log —
+  # used by the single-item "download again & replace").
+  to_download = list(all_ids) if FORCE_REDOWNLOAD else [vid for vid in all_ids if vid not in downloaded_ids]
 
   Path(download_folder).mkdir(exist_ok=True)
   with open(log_file, 'a') as log, open(error_file, 'a') as error_log:

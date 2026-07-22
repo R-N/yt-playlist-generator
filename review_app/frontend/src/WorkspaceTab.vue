@@ -7,16 +7,20 @@ import {
   itemMeta, isDead, isEnriched, healthLabel, itemTitle, itemName, itemAuthor, formatViews, formatDuration, formatUploadDate,
 } from './workspace'
 import { buildLabels, FILTER_ATTRS, matchesLabelFilter } from './labels'
-import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, workspaceLabelMenu, libraryLabelMenu, fileMenuItems, downloadMenuItems, untrackedMenuItems } from './curation'
+import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, useAudioDownload, useLocalDelete, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, workspaceLabelMenu, libraryLabelMenu, fileMenuItems, downloadMenuItems, untrackedMenuItems, withNewBase } from './curation'
 import CurationList from './CurationList.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
 import ActionMenu from './ActionMenu.vue'
 import InfoDialog from './InfoDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
+import TypedConfirmDialog from './TypedConfirmDialog.vue'
 import SearchPickerDialog from './SearchPickerDialog.vue'
 import ForceSetDialog from './ForceSetDialog.vue'
 import InfoEditDialog from './InfoEditDialog.vue'
 import VerifyScopeDialog from './VerifyScopeDialog.vue'
+import FormatDialog from './FormatDialog.vue'
+import DownloadRunAlert from './DownloadRunAlert.vue'
+import LyricsDialog from './LyricsDialog.vue'
 
 // Workspace items can't be saved-links or untracked files — hide those attrs.
 const WS_FILTER_ATTRS = FILTER_ATTRS.filter((attr) => !['saved', 'untracked'].includes(attr.key))
@@ -55,15 +59,36 @@ const { preview, fileInfo, ytAction, fileAction, statusAction } = useRowActions(
   onError: (e) => { error.value = String(e) },
   onNotice: (m) => { notice.value = m },
   openReview: async (row) => { try { reviewTrack(await api.track(row.trackId)) } catch (e) { error.value = String(e) } },
+  deleteFile: (row, source) => deleteFile(row, source),
+  reload: async () => { invalidateData(); await load() },
 })
+// Single-item download (YouTube-label button) + file deletes, both shared (curation.js).
+// Download finish → light refreshItems (not full load): only the downloaded/health labels
+// changed, so skip the runs refetch + on-load verify loop that make load() a jarring reload.
+const { fmtDialog: dlFmt, dlRun, askDownload, chooseFormat, dismissRun: dismissDlRun } = useAudioDownload({
+  onError: (e) => { error.value = String(e) }, onNotice: (m) => { notice.value = m },
+  reload: refreshItems,
+})
+const { deletePreview, deleteBusy, deleteOutcome, downloadConfirm, previewWorkspaceLocal, confirmLocal, askDownloadDelete, confirmDownloadDelete } = useLocalDelete({
+  onError: (e) => { error.value = String(e) }, onNotice: (m) => { notice.value = m },
+  reload: async () => { invalidateData(); await load() },
+})
+// Download = simple confirm (app output). Local file delete is by item id (server resolves the
+// item's mp3-folder file — direct ref or linked track — no approval gate; skips download/out-of-folder).
+function deleteFile(row, source) {
+  if (source === 'download') { askDownloadDelete([row.ytId]); return }
+  previewWorkspaceLocal([row.key])
+}
 // Membership-label actions (In Library / In Workspace). Remove-from-library confirms;
 // remove-from-workspace is the item's own removal (non-destructive to files).
 const membership = useMembershipActions({
   onError: (e) => { error.value = String(e) },
+  onNotice: (m) => { notice.value = m },
   reload: load,
   removeLibrary: (trackId) => { libRemoveConfirm.value = { trackId } },
   removeWorkspace: (itemId) => removeItems([itemId]),
 })
+const lyrics = ref({ open: false, kind: 'workspace', id: null, title: '' })
 // Interactive "Find on YouTube" / "Find local file" pickers (see SearchPickerDialog).
 const { picker, openYoutube, openLocal, onPick } = useSearchPicker({
   onError: (e) => { error.value = String(e) }, reload: load,
@@ -76,7 +101,9 @@ const entityFor = (item) => ({ kind: 'workspace', id: item.id, artist: itemAutho
 const info = ref({ open: false, title: '', data: {}, editable: [] })
 function openInfo(row) { info.value = { open: true, title: itemTitle(row.raw), data: row.raw, editable: ['title', 'channel'] } }
 async function saveInfo(fields) {
-  try { await api.workspacePatch(info.value.data.id, fields); info.value.open = false; invalidateData(); await load() }
+  // info.value.data IS the reactive item (openInfo passes row.raw) — patch it, no refetch.
+  // Peers refresh on re-entry (nav.useTabRefresh), so no reload/invalidateData needed here.
+  try { await api.workspacePatch(info.value.data.id, fields); Object.assign(info.value.data, fields); info.value.open = false }
   catch (e) { error.value = String(e) }
 }
 
@@ -108,6 +135,7 @@ const listRows = computed(() => pagedItems.value.map((item) => ({
   labels: labelsFor(item),
   ytUrl: ytUrl(item), ytId: item.youtube_id,
   trackId: item.track_id || null,
+  verifyKind: 'workspace', verifyId: item.id,
   setCheck: (v) => { item.track_check = v },
   embed: (source) => api.workspaceEmbed(item.id, source),
   fileSrc: wsLocalSrc(item),
@@ -122,6 +150,11 @@ const listRows = computed(() => pagedItems.value.map((item) => ({
   infoFor: () => item.relative_path
     ? { title: 'File info', lines: [['File', item.relative_path.split(/[\\/]/).pop()], ['Path', item.relative_path]] }
     : { title: 'File info', lines: [['File', item.track_filename || '—'], ['Artist', item.track_artist || '—'], ['Title', item.track_title || '—'], ['Local files', String(item.local_count || 0)]] },
+  onRenamed: (name, source) => {   // patch this row in place after Romanize filename (no full reload)
+    if (source === 'download') return
+    if (item.relative_path) item.relative_path = withNewBase(item.relative_path, name)
+    if (item.track_filename) item.track_filename = name
+  },
 })))
 
 // Which finished run the user dismissed, so it doesn't resurface every reload.
@@ -145,6 +178,13 @@ async function load() {
   finally { loading.value = false }
 }
 
+// Light refresh: re-pull just the items (updates downloaded/health/local labels) without
+// the runs refetch, dismissed-run bookkeeping, or on-load verify loop that load() runs.
+// No loading spinner, so the list updates in place instead of blanking out.
+async function refreshItems() {
+  try { items.value = (await api.workspace()).items; pruneSelected() }
+  catch (e) { error.value = String(e) }
+}
 function pruneSelected() {
   const dead = new Set(items.value.filter(isDead).map((item) => item.id))
   if (dead.size) selected.value = selected.value.filter((id) => !dead.has(id))
@@ -174,14 +214,20 @@ async function verify(ids) {
 }
 
 // Manual verify = paced background task (see Activity). scope: 'all' | 'unverified'.
-async function startVerify(scope) {
+async function startVerify(scope, ids = null) {
   startingVerify.value = true; error.value = ''
   try {
-    await api.verifyWorkspaceTask(scope)
+    await api.verifyWorkspaceTask(scope, ids)
     verifyDialog.value = false
     activeTab.value = 'activity'
   } catch (e) { error.value = e.message?.includes('409') ? 'A verify task is already running (see Activity).' : String(e) }
   finally { startingVerify.value = false }
+}
+// Verify labels: re-check link health + local/download for the SELECTED items (dead link on an
+// approved track -> unreviewed). No selection -> ask scope (avoid accidentally verifying 1000s).
+function startVerifyLabels() {
+  if (selected.value.length) startVerify('all', selected.value)
+  else verifyDialog.value = true
 }
 
 async function removeItems(ids) {
@@ -219,13 +265,24 @@ async function downloadBatch(format) {
     fileDownload(response.blob, `workspace-${format}.${format === 'csv' ? 'csv' : 'txt'}`)
   })
 }
-async function startDownload() {
+const bulkFmt = ref(false)
+// Bulk audio download now asks format first (shared FormatDialog). replace stays off for
+// bulk (skip-existing); the single YouTube-label download is the replace-on-success one.
+async function startDownload(format) {
+  bulkFmt.value = false
   await act('Starting audio download', async () => {
-    run.value = await api.workspaceDownloadRun(selected.value)
+    run.value = await api.workspaceDownloadRun(selected.value, format)
     runDuplicates.value = skippedDuplicateCount(run.value)
     invalidateData()
   })
 }
+// Selected items that carry a local file (linked-track catalog file OR a direct mp3-folder
+// ref) — all of them are deletable (no approval gate; the server skips any that resolve to a
+// download/out-of-folder file). Download-folder direct refs are excluded here.
+const selectedLocalItemIds = computed(() => chosen.value
+  .filter((item) => (item.local_count || 0) > 0 || (item.relative_path && !item.is_download_file))
+  .map((item) => item.id))
+const bulkDeleteLocal = () => previewWorkspaceLocal(selectedLocalItemIds.value)
 function labelsFor(item) {
   // A file ref in the download folder is a *download*, not an mp3-folder local/untracked
   // file (distinct — see CLAUDE.md). A direct file ref is "untracked" only when it has NO
@@ -252,9 +309,9 @@ function onLabel(row, label, ev) {
   const target = [ev.clientX, ev.clientY]
   const item = row.raw
   if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, row, items: ytMenuItems(row.ytId, { canFindLocal: !(item.relative_path || item.local_count), canSetLocal: true }) }
-  else if (label.key === 'local') fileMenu.value = { open: true, target, row, items: fileMenuItems({ canFindYoutube: !row.ytId, canSetYoutube: true, canEmbed: true }) }
+  else if (label.key === 'local') fileMenu.value = { open: true, target, row, items: fileMenuItems({ deletable: true, source: 'local', canFindYoutube: !row.ytId, canSetYoutube: true, canEmbed: true }) }
   else if (label.key === 'untracked') untrackedMenu.value = { open: true, target, row, items: untrackedMenuItems({ canSend: false }) }
-  else if (label.key === 'downloaded') downloadMenu.value = { open: true, target, row, items: downloadMenuItems() }
+  else if (label.key === 'downloaded') downloadMenu.value = { open: true, target, row, items: downloadMenuItems({ deletable: true }) }
   else if (label.key === 'confirmed' || label.key === 'rejected') statusMenu.value = { open: true, target, row }
   else if (label.key === 'inlibrary') memberMenu.value = { open: true, target, label, row, items: libraryLabelMenu({ trackId: label.trackId, onScreen: 'workspace', inWorkspace: true }) }
   else if (label.key === 'inworkspace') memberMenu.value = { open: true, target, label, row, items: workspaceLabelMenu({ onScreen: 'workspace', inLibrary: !!row.trackId }) }
@@ -268,11 +325,13 @@ const onDownloadMenu = (mode, row) => fileAction(mode, row, 'download')
 function onYtMenu(mode, row) {
   if (mode === 'find-local') openLocal({ title: itemTitle(row.raw), query: itemName(row.raw), target: { kind: 'workspace', id: row.key } })
   else if (mode === 'pick-local') pickLocalFile(entityFor(row.raw))
+  else if (mode === 'download') askDownload([row.ytId])
   else ytAction(mode, row)
 }
 function onMemberMenu(mode) {
   if (mode === 'info') openInfo(memberMenu.value.row)
-  else membership.run(mode, memberMenu.value.label)   // save-library routes to the unified endpoint
+  else if (mode === 'view-lyrics') lyrics.value = { open: true, kind: 'workspace', id: memberMenu.value.label.workspaceItemId, title: itemTitle(memberMenu.value.row.raw) }
+  else membership.run(mode, memberMenu.value.label)   // save-library / find-lyrics / find-metadata route through the shared dispatcher
 }
 function onUntrackedMenu(mode, row) {
   if (mode === 'add') saveToLibrary([row.key])   // "Send to Workspace" is hidden here (already in Workspace)
@@ -290,6 +349,8 @@ async function startFind(kind, fn) {
 }
 const findLocal = () => startFind('local', api.findLocalWorkspaceTask)
 const findYoutube = () => startFind('youtube', api.findYoutubeWorkspaceTask)
+const findLyrics = () => startFind('lyrics', api.findLyricsWorkspaceTask)
+const findMetadata = () => startFind('metadata', api.findMetadataWorkspaceTask)
 // Add absolute-path files as Workspace items (tracked or untracked); shared picker.
 const { picking, pickFiles } = useFilePicker({
   target: 'workspace',
@@ -306,7 +367,8 @@ async function refreshRun() {
   try {
     const wasActive = ACTIVE_RUN_STATUSES.includes(run.value.status)
     run.value = await api.workspaceRun(run.value.id)
-    if (wasActive && !ACTIVE_RUN_STATUSES.includes(run.value.status)) invalidateData()
+    // Bulk download just finished → refresh downloaded labels lightly (no full reload/verify).
+    if (wasActive && !ACTIVE_RUN_STATUSES.includes(run.value.status)) await refreshItems()
   }
   catch (e) { error.value = String(e) }
 }
@@ -346,6 +408,7 @@ onUnmounted(() => clearInterval(poll))
     :closable="run.status === 'done' || run.status === 'failed'" @click:close="dismissRun">
     Audio download: <strong>{{ run.status }}</strong>. {{ run.error_text || `${run.items?.length || 0} snapshotted items` }}
   </v-alert>
+  <DownloadRunAlert :run="dlRun" @dismiss="dismissDlRun" />
   <v-alert v-if="batchDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Playlist', batchDuplicates) }}</v-alert>
   <v-alert v-if="exportDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Download', exportDuplicates) }}</v-alert>
   <v-alert v-if="runDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Audio download', runDuplicates) }}</v-alert>
@@ -363,14 +426,20 @@ onUnmounted(() => clearInterval(poll))
     <v-btn icon variant="text" :loading="picking" aria-label="Add files" @click="pickFiles">
       <v-icon>mdi-file-plus-outline</v-icon><v-tooltip activator="parent" location="bottom">Add files from disk (absolute path)</v-tooltip>
     </v-btn>
-    <v-btn icon variant="text" :loading="startingVerify" aria-label="Verify links" @click="verifyDialog = true">
-      <v-icon>mdi-link-variant</v-icon><v-tooltip activator="parent" location="bottom">Verify links (background task)</v-tooltip>
+    <v-btn icon variant="text" :loading="startingVerify" aria-label="Verify labels" @click="startVerifyLabels">
+      <v-icon>mdi-check-decagram-outline</v-icon><v-tooltip activator="parent" location="bottom">Verify labels — link health + local/download for selection (background)</v-tooltip>
     </v-btn>
     <v-btn icon variant="text" :loading="finding === 'local'" :disabled="busy" aria-label="Find local file" @click="findLocal">
       <v-icon>mdi-folder-search-outline</v-icon><v-tooltip activator="parent" location="bottom">Find local file — missing/moved, auto-link (background)</v-tooltip>
     </v-btn>
     <v-btn icon variant="text" :loading="finding === 'youtube'" :disabled="busy" aria-label="Find YouTube link" @click="findYoutube">
       <v-icon>mdi-link-variant-plus</v-icon><v-tooltip activator="parent" location="bottom">Find YouTube link — missing/dead, auto-apply best (background)</v-tooltip>
+    </v-btn>
+    <v-btn icon variant="text" :loading="finding === 'lyrics'" :disabled="busy" aria-label="Find lyrics" @click="findLyrics">
+      <v-icon>mdi-text-search</v-icon><v-tooltip activator="parent" location="bottom">Find lyrics — fetch + store for selection (background)</v-tooltip>
+    </v-btn>
+    <v-btn icon variant="text" :loading="finding === 'metadata'" :disabled="busy" aria-label="Find metadata" @click="findMetadata">
+      <v-icon>mdi-tag-search-outline</v-icon><v-tooltip activator="parent" location="bottom">Find metadata — apply best MusicBrainz match for selection (background)</v-tooltip>
     </v-btn>
     <v-btn icon variant="text" :disabled="busy" aria-label="Generate Playlist" @click="generatePlaylist">
       <v-icon>mdi-playlist-play</v-icon><v-tooltip activator="parent" location="bottom">Generate Playlist</v-tooltip>
@@ -394,8 +463,11 @@ onUnmounted(() => clearInterval(poll))
         <v-list-item prepend-icon="mdi-playlist-play" title="Download playlist links" @click="download('playlist-links')" />
       </v-list>
     </v-menu>
-    <v-btn icon variant="text" color="primary" :loading="working === 'Starting audio download'" :disabled="busy" aria-label="Download audio" @click="startDownload">
-      <v-icon>mdi-download</v-icon><v-tooltip activator="parent" location="bottom">Download audio</v-tooltip>
+    <v-btn icon variant="text" color="primary" :loading="working === 'Starting audio download'" :disabled="busy" aria-label="Download audio" @click="bulkFmt = true">
+      <v-icon>mdi-download</v-icon><v-tooltip activator="parent" location="bottom">Download audio (choose format)</v-tooltip>
+    </v-btn>
+    <v-btn icon variant="text" color="error" :disabled="!selectedLocalItemIds.length" aria-label="Delete local files" @click="bulkDeleteLocal">
+      <v-icon>mdi-broom</v-icon><v-tooltip activator="parent" location="bottom">Delete local files on disk{{ selectedLocalItemIds.length ? ` · ${selectedLocalItemIds.length} selected` : ' — select items with a local file' }}</v-tooltip>
     </v-btn>
     <v-btn icon variant="text" color="error" :disabled="busy" aria-label="Remove" @click="removeItems(selected)">
       <v-icon>mdi-delete-outline</v-icon><v-tooltip activator="parent" location="bottom">Remove</v-tooltip>
@@ -432,9 +504,21 @@ onUnmounted(() => clearInterval(poll))
   <ActionMenu v-model="memberMenu.open" :target="memberMenu.target" :items="memberMenu.items" @select="(mode) => { onMemberMenu(mode); memberMenu.open = false }" />
   <SearchPickerDialog v-model="picker.open" :mode="picker.mode" :title="picker.title" :initial-query="picker.query" :artist="picker.artist" :song-title="picker.songTitle" @pick="onPick" />
   <ForceSetDialog :state="fset" @update:open="fset.open = $event" @update:value="setForceValue" @apply="applyForceSet" />
-  <InfoEditDialog v-model="info.open" :title="info.title" :data="info.data" :editable="info.editable" @save="saveInfo" />
+  <InfoEditDialog v-model="info.open" :title="info.title" :data="info.data" :editable="info.editable" @save="saveInfo" @error="error = $event" />
+  <LyricsDialog v-model="lyrics.open" :kind="lyrics.kind" :id="lyrics.id" :title="lyrics.title" />
   <InfoDialog v-model="fileInfo" />
   <VerifyScopeDialog v-model="verifyDialog" :busy="startingVerify" @pick="startVerify" />
+  <FormatDialog v-model="bulkFmt" title="Download selected" @pick="startDownload" />
+  <FormatDialog :model-value="dlFmt.open" :busy="dlFmt.busy" title="Download audio" @update:model-value="dlFmt.open = $event" @pick="chooseFormat" />
+  <TypedConfirmDialog :model-value="!!deletePreview" :title="`Delete ${deletePreview?.targets.length} local file(s) on disk?`" :loading="deleteBusy" @update:model-value="(v) => { if (!v) deletePreview = null }" @confirm="confirmLocal">
+    <p>Permanently deletes these mp3-folder files on disk. This can't be undone. Download and out-of-folder files are skipped.</p>
+    <v-alert v-if="deletePreview?.skipped?.length" type="info" variant="tonal" density="compact" class="mb-2">{{ deletePreview.skipped.length }} selected item(s) had no deletable mp3-folder file.</v-alert>
+    <v-list density="compact" class="my-3"><v-list-item v-for="target in deletePreview?.targets || []" :key="target.relative_path" :title="target.relative_path" /></v-list>
+  </TypedConfirmDialog>
+  <ConfirmDialog :model-value="!!downloadConfirm" title="Delete downloaded file?" confirm-label="Delete" :max-width="440" @update:model-value="(v) => { if (!v) downloadConfirm = null }" @confirm="confirmDownloadDelete">
+    Deletes the file in your download folder. The Library entry and any mp3-folder file stay.
+  </ConfirmDialog>
+  <v-alert v-if="deleteOutcome" type="info" variant="tonal" closable class="mb-4" @click:close="deleteOutcome = ''">{{ deleteOutcome }}</v-alert>
   <ConfirmDialog :model-value="!!libRemoveConfirm" title="Remove from Library?" confirm-label="Remove" @update:model-value="(v) => { if (!v) libRemoveConfirm = null }" @confirm="async () => { const id = libRemoveConfirm.trackId; libRemoveConfirm = null; try { await api.libraryRemove([id]); invalidateData(); await load() } catch (e) { error.value = String(e) } }">
     Deletes the Library entry and any downloaded file(s). Your mp3-folder files are not touched. This item stays in the Workspace.
   </ConfirmDialog>

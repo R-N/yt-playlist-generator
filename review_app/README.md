@@ -21,7 +21,10 @@ and Untracked screens are merged into Library.
   filterable list. Exact handoff to Workspace, Verify links (YouTube health),
   Remove (drops the Library entry + downloaded file), and Review handoff.
 - **Review** curates exact local-file matches; curation remains SQLite-backed.
-  Its menu offers **find another YouTube link** for a track.
+  Its menu offers **find another YouTube link** for a track. An **approval
+  checklist** (YouTube / Local file / Lyrics / Metadata) records the parts the
+  reviewer verified; approve requires **YouTube** checked, and the ticks are
+  saved with the decision (shown in Activity's Decision history).
 - **Activity** is the log: **Background tasks** (verify + find sweeps — running
   with progress + cancel, finished with a result; persisted in
   `background_tasks`, running rows marked `interrupted` on restart) and
@@ -37,12 +40,16 @@ are referenced in place): Import stages them as in-memory untracked files
 file-only items. `/api/files/add` is the one entry point (`target`
 `library`/`workspace`/`untracked`); `/api/pick-files` is the localhost picker.
 
-**Verify links** (Library + Workspace) is a paced background task, not a blocking
-loop — verifying thousands of links back-to-back would rate-limit. The button
-asks scope (**all** vs **only unverified**), then one worker thread (`tasks.py`)
-resolves yt-dlp health with a randomized delay, one verify at a time (a second
-request gets HTTP 409), cancellable, with a network-failure cutoff. Track it in
-Activity (`GET /api/tasks`); scope chooser is `VerifyScopeDialog.vue`.
+**Verify labels** (Library + Workspace bulk button) re-checks the *selected*
+items' link health plus local/download-file freshness as a paced background task
+(`tasks.py`, one yt-dlp health at a time, randomized delay, cancellable, HTTP 409
+if one already runs — thousands of links back-to-back would rate-limit). With no
+selection it falls back to a scope chooser (**all** vs **only unverified**,
+`VerifyScopeDialog.vue`). Each label also has a per-row verify (YouTube link,
+Local file, Downloaded). **A link found dead/private on an approved track sends
+the track back to unreviewed** (the check clears, decision history is kept) — the
+rule lives in `db.set_track_health`, so every verify path obeys it. Track runs in
+Activity (`GET /api/tasks`).
 
 **Labels** are shared clickable icon badges (`labels.js` / `LabelRow.vue`) used
 by Workspace, Library, and Import: YouTube, Local file, Downloaded, Untracked,
@@ -53,17 +60,54 @@ hub (there is no 3-dots menu). A **download** (file in the download folder) is
 distinct from a **local file** (mp3-folder catalog entry); a direct file ref is
 **untracked** only when it has no Library track. Notable menu actions:
 
-- YouTube: open/copy/copy-id/play; **Find local file** and **Pick local file…**
-  when the local file is missing/stale.
-- Local file / Downloaded: play/reveal/info and **Embed metadata** — write our
+- YouTube: open/copy/copy-id/play; **Download audio…** (below); **Find local
+  file** and **Pick local file…** when the local file is missing/stale.
+- Local file / Downloaded: play/reveal/info, **Embed metadata** — write our
   best-known artist/title into the file's tags (mutagen easy mode, supported
-  tags only). Local file also has **Find on YouTube** / **Set YouTube link…**.
+  tags only) — **Romanize filename** (below), and **Delete** (downloaded file =
+  simple confirm; local mp3-folder file = the approved-delete flow). Local file
+  also has **Find on YouTube** / **Set YouTube link…**.
 - Untracked (every screen): exactly **Add to Library** + **Send to Workspace**
   (Send hidden in Workspace).
 - In Library / In Workspace: Info, send/save, show, remove. **Save to library**
   routes server-side per item — a file becomes a Library track (any link carried
   onto it), a link-only item becomes a saved link — so per-row and the bulk
-  button share one endpoint (`POST /api/workspace/save-to-library`).
+  button share one endpoint (`POST /api/workspace/save-to-library`). The In
+  Workspace menu also holds **Find lyrics**, **View lyrics**, and **Find
+  metadata** (below).
+
+Review renders this same shared label row for the track under review, so every
+applicable label + menu is available there too.
+
+**Find lyrics / Find metadata** are per-row (In-Workspace label) and bulk
+(Workspace toolbar) — paced background sweeps like Find link. Lyrics reuse the
+repo-root `lyrics_fetch` providers (LRCLIB, then NetEase/Kugou/J-Lyric), store in
+the item's `metadata_json` and, when the item has a local file, as a `.lrc`/`.txt`
+sidecar (read sidecar-first). Metadata is a MusicBrainz recording lookup that
+auto-applies the best artist/title above `MB_MIN_SCORE` (reversible via Info). The
+**Review** tab's right panel is **Embed | Lyrics** tabs: timestamped (LRC) lyrics
+highlight and auto-scroll to whichever audio plays — the local file or the YouTube
+candidate, only one at a time (`LyricsView.vue` + `lyrics.js`).
+
+**Download audio** runs the repo `downloader.py` in the background (one at a
+time, tracked as a run). Every download button asks a **format** first (opus /
+mp3 / m4a — `FormatDialog`). Workspace's **bulk** download skips already-present
+ids; the **YouTube-label** button downloads any id on any screen and **replaces
+on success** — a failed download keeps the old file, and only after a new file
+lands is the stale old-format copy removed. **Delete** on the Downloaded label is
+a simple confirm (the app's own output). Deleting a local mp3-folder file uses
+the token + typed-`DELETE` flow: on **Library** it is approved-only (by track
+id); on **Workspace** (label menu or the bulk broom button) it works on any
+selected item that has a local file, resolving the file server-side — no approval
+required, though download and out-of-folder files are always skipped.
+
+**Romanize** (CJK → Hepburn via `pykakasi`, non-ASCII only so ASCII, LRC
+timestamps, `[ids]` and extensions pass through untouched) sits on three
+surfaces: a Romanize button in the **lyrics editor** and **metadata editor**
+rewrites the draft/fields in place (you then Save; `POST /api/romanize`), and
+**Romanize filename** on the Local file / Downloaded labels renames the file on
+disk (`POST /api/romanize/filename`), repointing the DB refs + lyric sidecars and
+rebuilding the catalog. Japanese-accurate; Chinese falls back to Japanese on-yomi.
 
 **Find link** finds a missing YouTube link or local file from whatever the entry
 already carries (stored metadata, a linked track, downloaded file, or file tags,
@@ -78,9 +122,10 @@ confirming. Local searches refresh the catalog first so a just-downloaded file
 is found without a manual rescan. Every db-backed row also has an **Info** modal
 (`InfoEditDialog.vue`) showing all fields, with edit of a fixed column allow-list.
 
-**Link finding** settings: search top-N, task delay min/max, YouTube/local min
-score (accept-floor for auto-apply), and picker result count. **Advanced**
-settings: delete-token TTL and the download-cleanup junk-extension list.
+**Link finding** settings: search top-N, task delay min/max, YouTube/local/
+MusicBrainz min score (accept-floor for auto-apply), and picker result count.
+**Advanced** settings: delete-token TTL and the download-cleanup junk-extension
+list.
 
 Workspace, Library, and Import-untracked render the same list via
 `CurationList.vue`. The reactive plumbing and per-action logic live once in

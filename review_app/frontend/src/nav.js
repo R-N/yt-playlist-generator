@@ -33,10 +33,14 @@ if (hasWindow) {
 
 export function invalidateData() { dataRevision.value += 1 }
 
-// Every primary screen reloads on a data-revision bump and when the user
-// (re)enters its tab. Wire both watches in one call so the tabs don't drift.
+// A screen reloads when the user (re)enters its tab. That alone keeps every
+// inactive tab fresh, since only the active tab is interacted with. We deliberately
+// do NOT reload the active tab on every invalidateData() bump: an action on the
+// active tab already refreshes it (an explicit reload, an in-place patch, or a light
+// targeted refetch), so a revision-driven reload would just be a second, full,
+// whole-list reload on top — the churn we want to avoid. invalidateData() remains a
+// cheap "peers are stale" marker; peers act on it when re-entered.
 export function useTabRefresh(tabName, load) {
-  watch(dataRevision, () => { if (activeTab.value === tabName) load() })
   watch(activeTab, (tab, previous) => { if (tab === tabName && tab !== previous) load() })
 }
 

@@ -80,6 +80,10 @@ def init_db():
                 ts        TEXT NOT NULL
             )
         """)
+        # Approval checklist (JSON list of verified parts: youtube/local/lyrics/metadata).
+        dcols = {r[1] for r in conn.execute("PRAGMA table_info(decisions)")}
+        if "checklist" not in dcols:
+            conn.execute("ALTER TABLE decisions ADD COLUMN checklist TEXT")
         _init_workspace_schema(conn)
         # Health of the track's YouTube link (ok/dead/private/unknown), set by the
         # Library "Verify links" action. Added by migration for existing DBs.
@@ -108,6 +112,11 @@ def init_db():
             started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             finished_at TEXT
         )""")
+        # Per-outcome counters (success/failure/skip) for the task log.
+        tcols = {r[1] for r in conn.execute("PRAGMA table_info(background_tasks)")}
+        for c in ("ok", "failed", "skipped"):
+            if c not in tcols:
+                conn.execute(f"ALTER TABLE background_tasks ADD COLUMN {c} INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
         conn.execute(
@@ -521,6 +530,26 @@ def set_workspace_file(item_id, folder_identity, relative_path):
         conn.close()
 
 
+def rename_file_link(folder_identity, old_rel, new_rel, old_base, new_base):
+    """Point every DB reference at a file renamed on disk: its track link, any
+    Workspace item that refs it directly, and the tracks.filename basename. Called
+    right after the on-disk rename so nothing dangles. Catalog links are rebuilt
+    separately (sync_catalog_links)."""
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("UPDATE track_file_links SET relative_path=? "
+                         "WHERE folder_identity=? AND relative_path=?",
+                         (new_rel, folder_identity, old_rel))
+            conn.execute("UPDATE workspace_items SET relative_path=? "
+                         "WHERE folder_identity=? AND relative_path=?",
+                         (new_rel, folder_identity, old_rel))
+            conn.execute("UPDATE tracks SET filename=? WHERE filename=?",
+                         (new_base, old_base))
+    finally:
+        conn.close()
+
+
 def sync_catalog_links(records):
     """Refresh exact local links from current validated catalog.
 
@@ -643,6 +672,40 @@ def finish_local_deletions(entries):
         conn.close()
 
 
+def mark_links_unavailable(folder_identity, relative_path):
+    """Flag every track link to this exact file as unavailable — its file was deleted on
+    disk. Keeps local_count (which counts available links) in sync so the 'local' label drops."""
+    conn = connect()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE track_file_links SET available=0 WHERE folder_identity=? AND relative_path=?",
+                (folder_identity, relative_path),
+            )
+    finally:
+        conn.close()
+
+
+def clear_workspace_file_ref_or_remove(item_id):
+    """A Workspace item's own direct file was deleted. Drop the now-dangling file ref; if that
+    leaves the item with no identity (no YouTube id, no track), remove the item entirely."""
+    conn = connect()
+    try:
+        with conn:
+            row = conn.execute(
+                "SELECT youtube_id, track_id FROM workspace_items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                return
+            if row["youtube_id"] is not None or row["track_id"] is not None:
+                conn.execute(
+                    "UPDATE workspace_items SET folder_identity=NULL, relative_path=NULL WHERE id=?",
+                    (item_id,))
+            else:
+                conn.execute("DELETE FROM workspace_items WHERE id=?", (item_id,))
+    finally:
+        conn.close()
+
+
 def list_deletion_audit():
     conn = connect()
     try:
@@ -731,11 +794,33 @@ def reset_track_review(track_ids):
         conn.close()
 
 
+def _clear_check_if_dead(conn, track_id, health):
+    """A dead/private link on an APPROVED track sends it back to unreviewed (clears the
+    check, keeps the append-only decision history). Centralized so every verify path — bulk,
+    per-row, library or workspace-linked — enforces it. NULL check = unreviewed."""
+    if track_id is not None and health in ("dead", "private"):
+        conn.execute('UPDATE tracks SET "check"=NULL WHERE id=? AND "check"=1', (track_id,))
+
+
 def set_track_health(track_id, health):
     conn = connect()
     try:
         with conn:
             conn.execute("UPDATE tracks SET yt_health=? WHERE id=?", (health, track_id))
+            _clear_check_if_dead(conn, track_id, health)
+    finally:
+        conn.close()
+
+
+def unreview_track_if_dead(track_id, health):
+    """Same dead-link -> unreviewed rule, for callers that don't write track health directly
+    (e.g. verifying a Workspace item whose link is the linked track's candidate)."""
+    if track_id is None:
+        return
+    conn = connect()
+    try:
+        with conn:
+            _clear_check_if_dead(conn, track_id, health)
     finally:
         conn.close()
 
@@ -1027,12 +1112,14 @@ def create_task(kind, title, total):
         conn.close()
 
 
-def bump_task(task_id, done=0, found=0):
+def bump_task(task_id, done=0, found=0, ok=0, failed=0, skipped=0):
     conn = connect()
     try:
         with conn:
-            conn.execute("UPDATE background_tasks SET done=done+?, found=found+? "
-                         "WHERE id=?", (done, found, task_id))
+            conn.execute(
+                "UPDATE background_tasks SET done=done+?, found=found+?, "
+                "ok=ok+?, failed=failed+?, skipped=skipped+? WHERE id=?",
+                (done, found, ok, failed, skipped, task_id))
     finally:
         conn.close()
 
@@ -1072,13 +1159,32 @@ def list_decisions(limit=200):
     """The append-only approve/reject log, newest first, with each track's title."""
     conn = connect()
     try:
-        return [dict(row) for row in conn.execute(
-            "SELECT d.id, d.track_id, d.filename, d.yt_id, d.decision, d.ts, "
+        rows = [dict(row) for row in conn.execute(
+            "SELECT d.id, d.track_id, d.filename, d.yt_id, d.decision, d.checklist, d.ts, "
             "       t.title, t.artist, t.yt_title "
             "FROM decisions d LEFT JOIN tracks t ON t.id = d.track_id "
             "ORDER BY d.id DESC LIMIT ?", (limit,))]
+        for r in rows:
+            r["checklist"] = json.loads(r["checklist"]) if r.get("checklist") else []
+        return rows
     finally:
         conn.close()
+
+
+def latest_decision(track_id):
+    """Most recent approve/reject for a track (with its checklist), or None."""
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT decision, checklist, ts FROM decisions WHERE track_id=? "
+            "ORDER BY id DESC LIMIT 1", (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    d = dict(row)
+    d["checklist"] = json.loads(d["checklist"]) if d.get("checklist") else []
+    return d
 
 
 def get_workspace_run(run_id):
@@ -1539,9 +1645,12 @@ def counts():
         conn.close()
 
 
-def record_decision(track_id, decision):
-    """Append to decisions + update tracks.check, atomically. Returns new state."""
+def record_decision(track_id, decision, checklist=None):
+    """Append to decisions + update tracks.check, atomically. Returns new state.
+    checklist = verified parts (youtube/local/lyrics/metadata) recorded with the row.
+    The 'approve needs youtube' policy is enforced at the API boundary."""
     decision = 1 if decision else 0
+    checked = [c for c in (checklist or []) if c]
     conn = connect()
     try:
         track = conn.execute(
@@ -1551,15 +1660,16 @@ def record_decision(track_id, decision):
             raise KeyError(f"No track with id {track_id}")
         with conn:  # transaction: both statements commit together or not at all
             conn.execute(
-                "INSERT INTO decisions (track_id, filename, yt_id, decision, ts) "
-                "VALUES (?,?,?,?,?)",
+                "INSERT INTO decisions (track_id, filename, yt_id, decision, checklist, ts) "
+                "VALUES (?,?,?,?,?,?)",
                 (track["id"], track["filename"], track["yt_id"], decision,
+                 json.dumps(checked) if checked else None,
                  datetime.now().isoformat(timespec="seconds")),
             )
             conn.execute(
                 'UPDATE tracks SET "check" = ? WHERE id = ?', (decision, track_id)
             )
-        return {"id": track_id, "check": decision}
+        return {"id": track_id, "check": decision, "checklist": checked}
     finally:
         conn.close()
 

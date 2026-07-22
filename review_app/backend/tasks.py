@@ -80,27 +80,32 @@ def _worker(task_id, ids, do_one, delay, noun="flagged"):
             try:
                 flagged = bool(do_one(_id))
                 fails = 0
+                db.bump_task(task_id, done=1, found=1 if flagged else 0, ok=1)
             except _NetworkDown:
                 fails += 1
+                db.bump_task(task_id, done=1, skipped=1)
                 if fails >= NETWORK_FAIL_CUTOFF:
                     db.finish_task(task_id, "error",
                                    "stopped after repeated network errors — resume later")
                     return
                 continue
             except Exception:            # one bad item must not kill the sweep
-                flagged = False
-            db.bump_task(task_id, done=1, found=1 if flagged else 0)
+                db.bump_task(task_id, done=1, failed=1)
             time.sleep(random.uniform(*delay))
         task = db.get_task(task_id)
-        if is_cancelled(task_id):
-            db.finish_task(task_id, "cancelled", f"{task['found']} {noun}")
-        else:
-            db.finish_task(task_id, "done", f"{task['found']} {noun}")
+        summary = _summary(task, noun)
+        db.finish_task(task_id, "cancelled" if is_cancelled(task_id) else "done", summary)
     finally:
         _cancel.discard(task_id)
         with _lock:
             if _active == task_id:
                 _active = None
+
+
+def _summary(task, noun):
+    """Finished-task message: found count + per-outcome tallies."""
+    return (f"{task['found']} {noun} · {task['ok']} ok, "
+            f"{task['failed']} failed, {task['skipped']} skipped")
 
 
 class _NetworkDown(Exception):

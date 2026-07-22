@@ -21,9 +21,20 @@ function statusColor(s) { return STATUS[s] || 'grey' }
 function pct(t) { return t.total ? Math.round((t.done / t.total) * 100) : 0 }
 function glance(t) {
   const base = t.total ? `${t.done} / ${t.total}` : `${t.done} done`
-  return t.status === 'running' ? `${base}${t.found ? ` · ${t.found} flagged` : ''}` : (t.message || base)
+  if (t.status !== 'running') return t.message || base
+  const bits = [base]
+  if (t.found) bits.push(`${t.found} flagged`)
+  if (t.failed) bits.push(`${t.failed} failed`)
+  if (t.skipped) bits.push(`${t.skipped} skipped`)
+  return bits.join(' · ')
 }
-function fmt(ts) { return ts ? new Date(ts.replace(' ', 'T') + 'Z').toLocaleString() : '' }
+// Task rows: "YYYY-MM-DD HH:MM:SS" (UTC, from CURRENT_TIMESTAMP). Decision rows:
+// "YYYY-MM-DDTHH:MM:SS" (local ISO). Only the former needs the UTC 'Z'.
+function fmt(ts) {
+  if (!ts) return ''
+  const iso = ts.includes('T') ? ts : ts.replace(' ', 'T') + 'Z'
+  return new Date(iso).toLocaleString()
+}
 
 async function loadTasks() {
   try { tasks.value = (await api.tasks()).tasks } catch (e) { error.value = String(e) }
@@ -93,6 +104,7 @@ onUnmounted(() => clearInterval(poll))
               <span>{{ d.decision === 1 ? 'Approved' : 'Rejected' }}</span>
               <span v-if="d.artist" class="text-caption text-medium-emphasis ml-2">· {{ d.artist }}</span>
               <span class="text-caption text-medium-emphasis ml-2">· {{ fmt(d.ts) }}</span>
+              <v-chip v-for="c in (d.checklist || [])" :key="c" size="x-small" color="success" variant="tonal" class="ml-1">{{ c }}</v-chip>
             </template>
             <template #append>
               <a v-if="d.yt_id" :href="`https://www.youtube.com/watch?v=${d.yt_id}`" target="_blank" rel="noopener noreferrer" class="text-caption">#{{ d.yt_id }}</a>

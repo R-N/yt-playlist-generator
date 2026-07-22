@@ -19,7 +19,7 @@ MANAGED_KEYS = [
     "DISCORD_BOT_TOKEN", "DISCORD_CHANNEL_ID", "ACOUSTID_API_KEY",
     "MP3_FOLDERS_JSON", "DOWNLOAD_FOLDER",
     "YT_SEARCH_TOP_N", "TASK_DELAY_MIN", "TASK_DELAY_MAX",
-    "YT_MIN_SCORE", "LOCAL_MIN_SCORE",
+    "YT_MIN_SCORE", "LOCAL_MIN_SCORE", "MB_MIN_SCORE", "MB_SEARCH_LIMIT",
     "SEARCH_RESULT_LIMIT", "DELETE_TOKEN_TTL", "CLEANUP_EXTENSIONS",
 ]
 
@@ -108,6 +108,24 @@ def local_min_score(default=60):
     """Lowest filename partial-ratio (0..100) an auto find-local match may have."""
     try:
         return max(0, min(int(float(get("LOCAL_MIN_SCORE", default))), 100))
+    except (TypeError, ValueError):
+        return default
+
+
+def mb_min_score(default=90):
+    """Lowest MusicBrainz match score (0..100) an auto find-metadata result may have
+    to be applied. Higher = only very confident matches overwrite artist/title."""
+    try:
+        return max(0, min(int(float(get("MB_MIN_SCORE", default))), 100))
+    except (TypeError, ValueError):
+        return default
+
+
+def mb_search_limit(default=5):
+    """How many MusicBrainz recording candidates find-metadata fetches before it picks
+    the highest-scoring one (1..25)."""
+    try:
+        return max(1, min(int(float(get("MB_SEARCH_LIMIT", default))), 25))
     except (TypeError, ValueError):
         return default
 

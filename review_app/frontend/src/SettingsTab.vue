@@ -11,7 +11,7 @@ const folders = ref([])
 const picking = ref(false)
 const downloadFolder = ref('')
 const pickingDownload = ref(false)
-const linkFinding = ref({ YT_SEARCH_TOP_N: '', TASK_DELAY_MIN: '', TASK_DELAY_MAX: '', YT_MIN_SCORE: '', LOCAL_MIN_SCORE: '', SEARCH_RESULT_LIMIT: '' })
+const linkFinding = ref({ YT_SEARCH_TOP_N: '', TASK_DELAY_MIN: '', TASK_DELAY_MAX: '', YT_MIN_SCORE: '', LOCAL_MIN_SCORE: '', MB_MIN_SCORE: '', MB_SEARCH_LIMIT: '', SEARCH_RESULT_LIMIT: '' })
 const advanced = ref({ DELETE_TOKEN_TTL: '', CLEANUP_EXTENSIONS: '' })
 const saving = ref(false)
 const saved = ref(false)
@@ -172,6 +172,8 @@ useTabRefresh('settings', load)
         <v-text-field v-model="linkFinding.TASK_DELAY_MAX" type="number" min="0" step="0.5" density="compact" variant="outlined" hide-details label="Delay max (s)" placeholder="4" style="min-width:120px" />
         <v-text-field v-model="linkFinding.YT_MIN_SCORE" type="number" density="compact" variant="outlined" hide-details label="YouTube min score" placeholder="0" style="min-width:120px" />
         <v-text-field v-model="linkFinding.LOCAL_MIN_SCORE" type="number" min="0" max="100" density="compact" variant="outlined" hide-details label="Local min score" placeholder="60" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.MB_MIN_SCORE" type="number" min="0" max="100" density="compact" variant="outlined" hide-details label="MusicBrainz min score" placeholder="90" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.MB_SEARCH_LIMIT" type="number" min="1" max="25" density="compact" variant="outlined" hide-details label="MusicBrainz candidates" placeholder="5" style="min-width:120px" />
         <v-text-field v-model="linkFinding.SEARCH_RESULT_LIMIT" type="number" min="1" max="50" density="compact" variant="outlined" hide-details label="Picker results" placeholder="10" style="min-width:120px" />
         <v-btn color="primary" :loading="saving" @click="saveLinkFinding">Save</v-btn>
       </div>

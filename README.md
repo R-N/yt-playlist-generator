@@ -33,9 +33,9 @@ The former Local Files and Untracked screens are folded into Library.
   and isolated download runs. A Workspace item references a YouTube id, a
   library track, or a local file directly, so link-less files can stage there.
 - **Library** merges tracks, Saved Links, and untracked local files in one
-  filterable list. Exact handoff to Workspace, Verify links (YouTube health),
-  and Remove (drops the entry + downloaded file). Saved Links require exact
-  local-file matching before Review.
+  filterable list. Exact handoff to Workspace, Verify labels (link health +
+  local/download freshness), and Remove (drops the entry + downloaded file).
+  Saved Links require exact local-file matching before Review.
 - **Review** curates exact local-file matches.
 - **Activity** logs background tasks (verify sweeps — running with progress and
   a cancel, or finished with a result) and the append-only approve/reject
@@ -43,20 +43,28 @@ The former Local Files and Untracked screens are folded into Library.
 - **Settings** validates mp3 folders, sets the separate download folder,
   rescans the catalog, stores credentials, and owns failed-download cleanup.
 
-**Verify links** (Library and Workspace) runs as a background task: checking
+**Verify labels** (Library and Workspace) re-checks the selected items' link
+health plus local/download-file freshness as a background task: checking
 thousands of YouTube links back-to-back would get rate-limited, so it paces
-itself with a randomized delay and is cancellable. The button asks whether to
-verify **all** links or **only unverified** ones (fewer = faster); watch it under
-Activity.
+itself with a randomized delay and is cancellable. With no selection it asks
+whether to verify **all** links or **only unverified** ones; watch it under
+Activity. Each label also has a per-row verify. **A link found dead on an
+approved track sends the track back to unreviewed** (check clears, decision
+history kept).
 
 Shared clickable **labels** (YouTube, Local file, Downloaded, Untracked,
 Confirmed, Rejected) appear in Workspace and Library. A **download**
 (download-folder file) is distinct from a **local file** (mp3-folder catalog).
+Label menus include **Download audio** (opus/mp3/m4a; the YouTube-label button
+replaces on success), **Embed metadata**, **Romanize filename** (CJK → Hepburn),
+per-row **verify**, and **Delete**.
 
 Folder operations use configured-folder containment and exact folder-plus-
-relative-path identity. Selected mp3-folder deletion is approved-only: preview
-exact targets, confirm short-lived token/manifest, type `DELETE`, revalidate
-identity and containment, then audit. Removing a Library entry drops only the
+relative-path identity. mp3-folder deletion always previews exact targets,
+confirms a short-lived token/manifest, types `DELETE`, revalidates identity and
+containment, then audits — Library delete is approved-only; Workspace delete
+(the user curates there) is not, but is otherwise identical. Removing a Library
+entry drops only the
 row + its downloaded file. Failed-download cleanup confirms against an immutable
 manifest and does not rescan at confirm.
 

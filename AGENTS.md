@@ -62,16 +62,21 @@ former Local Files and Untracked screens are folded into Library.
   resurfacing on reload; active runs always show.
 - **Library** merges tracks, Saved Links, and untracked local files into one
   filterable list (tri-state, Tachiyomi-style label filter incl. `untracked`).
-  Exact handoff to Workspace; **Verify links** (see below); **Remove** deletes
+  Exact handoff to Workspace; **Verify labels** (see below); **Remove** deletes
   the Library entry and its downloaded file (never the mp3-folder file). Saved
   Links reach Review only after exact local-file match.
-- **Verify links** (Library + Workspace toolbars) runs as a paced background
-  task — verifying 7k+ links back-to-back would rate-limit. The button asks
-  scope (**all** vs **only unverified**), then `tasks.run` starts ONE worker
-  thread that resolves yt-dlp health with a randomized delay, one verify at a
-  time (409 if another is active), cancellable, with a consecutive-network-fail
-  cutoff. Persists `tracks.yt_health` / workspace `metadata_json`. The old capped
-  `/api/library/verify` + `/api/workspace/enrich` loops remain (on-load enrich).
+- **Verify labels** (Library + Workspace toolbars) re-checks the SELECTED items'
+  link health + local/download freshness as a paced background task — verifying
+  7k+ links back-to-back would rate-limit. No selection → scope chooser (**all**
+  vs **only unverified**). `tasks.run` starts ONE worker thread resolving yt-dlp
+  health with a randomized delay, one at a time (409 if another is active),
+  cancellable, consecutive-network-fail cutoff; refreshes the catalog + runs the
+  shared `_verify_entity_local` per selected item first. Persists
+  `tracks.yt_health` / workspace `metadata_json`. Per-row verify lives on the
+  labels: `POST /api/{kind}/{id}/verify-{link,local,download}`. **A dead/private
+  link on an approved track sends it back to unreviewed** — centralized in
+  `db.set_track_health` / `db.unreview_track_if_dead`, so every verify path obeys
+  it. The old capped `/api/workspace/enrich` on-load loop remains.
 - **Activity** is the log: **Background tasks** (`background_tasks` table; running
   → progress + cancel, finished → result; running rows become `interrupted` on
   restart) and **Decision history** (`decisions`, append-only, read-only). Scope
@@ -82,7 +87,11 @@ former Local Files and Untracked screens are folded into Library.
 - **Labels** (`labels.js` + `LabelRow.vue`) are the shared clickable icon
   badges for Workspace, Library, and Import. A **download** (download-folder
   file, keyed by `[<id>]` in name) is distinct from a **local file** (mp3-folder
-  catalog).
+  catalog). Menu actions include **Download audio…** (format modal opus/mp3/m4a,
+  `_start_download_run`; YouTube-label single = replace-on-success), per-row
+  **Verify link/file/download**, **Embed metadata**, **Romanize filename** (CJK →
+  Hepburn via `pykakasi`, `backend/romanize.py`; also on lyrics + metadata
+  editors), and **Delete**.
 - Workspace, Library, and Import-untracked share one list view
   (`CurationList.vue`); reactive plumbing and action dispatch live once in
   `curation.js` (`useRowActions`/`usePreview`/`usePagination`/`useSelection`/
@@ -90,12 +99,14 @@ former Local Files and Untracked screens are folded into Library.
   per-screen bits (delete, review), so an action fix lands everywhere at once.
 - Folder operations validate configured directories and containment. File
   identity uses configured folder plus relative path, never basename alone.
-- Selected mp3-folder deletion previews exact targets, uses short-lived
-  token/manifest checks, requires typed `DELETE`, revalidates
-  identity/containment, audits outcomes, and permits deletion only for approved
-  files. Download-file deletion is the app's own output (simple confirm, no
-  token). `explorer /select` reveal and the tkinter folder picker are
-  localhost-only (server host = user machine).
+- mp3-folder deletion previews exact targets, uses short-lived token/manifest
+  checks, requires typed `DELETE`, revalidates identity/containment, audits
+  outcomes, and only touches configured-folder files. **Library** delete is
+  approved-only (by track id); **Workspace** bulk/label delete (by item id,
+  resolves each item's file server-side) is not approval-gated — the user curates
+  there — but is otherwise identical (both share `useLocalDelete`). Download-file
+  deletion is the app's own output (simple confirm, no token). `explorer /select`
+  reveal and the tkinter folder picker are localhost-only (server = user machine).
 - Serve/open the app by hostname (`localhost`), never a bare IP: YouTube's
   embedded player rejects an IP-origin referer ("Video unavailable"). `run.py`
   defaults `--host` to `localhost`.

@@ -58,33 +58,91 @@ were merged into Library.
   dismissed finished download-run alert is remembered (localStorage) so it
   doesn't resurface on reload; active runs always show.
 - Library merges tracks, Saved Links, and untracked local files in one list.
-  Exact handoff to Workspace; Review curation; **Verify links**; **Remove**
+  Exact handoff to Workspace; Review curation; **Verify labels**; **Remove**
   (deletes the Library entry + its downloaded file, never the mp3-folder file).
   Tri-state (Tachiyomi-style) label filter, `untracked` included.
-- **Verify links** (Library + Workspace) is a paced background task, not a
-  blocking loop: 7k+ links would rate-limit. The button asks scope — **all** or
-  **only unverified** (fewer = faster) — then starts one worker thread
-  (`tasks.py`) that resolves yt-dlp health with a randomized delay, one verify
-  at a time (global rate limit), cancellable, with a network-fail cutoff. Writes
-  `tracks.yt_health` / workspace `metadata_json`. Workspace's on-load enrich
+- **Verify labels** (Library + Workspace bulk button) re-checks the SELECTED
+  items' link health + local/download freshness as a paced background task
+  (`tasks.py`, one yt-dlp health at a time, randomized delay, cancellable,
+  network-fail cutoff — 7k+ links would rate-limit). No selection → falls back to
+  the scope chooser (**all** / **only unverified**, `VerifyScopeDialog.vue`). The
+  task refreshes the catalog first (local labels) and writes `tracks.yt_health` /
+  workspace `metadata_json`. Per-row verify lives on the labels too:
+  `POST /api/{kind}/{id}/verify-{link,local,download}` (YouTube / Local file /
+  Downloaded menus). **A dead/private link on an approved track sends it back to
+  unreviewed** — enforced centrally in `db.set_track_health` /
+  `db.unreview_track_if_dead`, so every verify path (bulk, per-row, library or
+  workspace-linked) obeys it. Workspace's on-load enrich
   (`/api/workspace/enrich`) stays a separate capped foreground loop.
 - **Activity** shows the log: **Background tasks** (running with progress +
   cancel, finished with result; persisted in `background_tasks`, orphaned-running
   → `interrupted` on restart) and **Decision history** (the append-only
-  `decisions` log, read-only). `VerifyScopeDialog.vue` is the shared scope chooser.
+  `decisions` log, read-only). Task rows carry per-outcome tallies
+  (`ok`/`failed`/`skipped` alongside `done`/`total`/`found`); the worker bumps
+  exactly one per item (success / raised / NetworkDown) and the finish message
+  reads `N noun · O ok, F failed, S skipped`. `VerifyScopeDialog.vue` is the
+  shared scope chooser.
 - **Labels** (`labels.js` + `LabelRow.vue`, shared by Workspace, Library, and
   Import) are clickable icon badges and the row's ONLY action hub (no 3-dots):
   YouTube, Local file, Downloaded, Untracked, Confirmed, Rejected, plus
   membership **In Library** / **In Workspace** (shown wherever true via
   cross-lookup; self-referential rows hidden). Menus: YouTube (open/copy/copy-id/
-  play, + Find/Pick local file when local missing/stale); Local file + Downloaded
-  (play/reveal/info + **Embed metadata**; Local also Find on YouTube / Set
-  YouTube link…); Untracked is exactly Add to Library + Send to Workspace (Send
+  play, **Download audio…**, **Verify link**, + Find/Pick local file when local
+  missing/stale);
+  Local file + Downloaded
+  (play/reveal/info + **Verify file/download** + **Embed metadata** +
+  **Romanize filename** + **Delete**;
+  Local also Find
+  on YouTube / Set YouTube link…); Untracked is exactly Add to Library + Send to Workspace (Send
   hidden in Workspace) — identical on every screen via `untrackedMenuItems`;
-  membership labels (Info, send/save, show, remove).
+  **In Workspace** membership label (Info, Save to library, **Find lyrics**,
+  **View lyrics**, **Find metadata**, show, remove). Confirmed/Rejected menu:
+  **Decision info** (read-only checklist from `GET /api/track/{id}/decision` →
+  `decisionInfo`), Set unreviewed, Re-review. Review renders the same shared
+  `LabelRow` for the track under review (all applicable labels + menus).
 - **Embed metadata** writes our best-known artist/title into the file's tags
   (mutagen easy mode — supported tags only). `source` `local`|`download` picks
   which file. `POST /api/{track,workspace}/{id}/embed`.
+- **Find lyrics / Find metadata** (In-Workspace label + Workspace bulk toolbar,
+  paced `tasks.py` sweeps like Find link). Lyrics reuse the repo-root
+  `lyrics_fetch` providers (LRCLIB + NetEase/Kugou/J-Lyric); stored in the item's
+  `metadata_json` and, when it has a local file, as a `.lrc`/`.txt` sidecar (read
+  sidecar-first). Metadata is a small MusicBrainz recording lookup (`_mb_best`)
+  that auto-applies the best artist/title above `MB_MIN_SCORE`/`MB_SEARCH_LIMIT`
+  candidates — reversible via Info. Generic over kind (`track`|`workspace`, like
+  `/embed`): `GET/POST /api/{kind}/{id}/lyrics`, `POST /api/{kind}/{id}/lyrics/save`
+  (edit), `POST /api/{kind}/{id}/find-metadata`, `GET /api/{kind}/{id}/file-tags`,
+  `POST /api/tasks/find-{lyrics,metadata}/workspace` (bulk). One implementation in
+  `_entity_*` helpers, thin route wrappers. See usb-ldac
+  (`web/api/{lyrics,metadata}.py`) for the reference.
+- **Romanize** (CJK → Hepburn, non-ASCII only so ASCII/LRC-timestamps/`[ids]`/
+  extensions pass through) via `pykakasi` in `backend/romanize.py` (ported from
+  usb-ldac). Lives on three surfaces: the **lyrics editor** (`LyricsView`) and
+  **metadata editor** (`InfoEditDialog`) get a Romanize button that rewrites the
+  draft/fields in place (user then Saves) — both call `POST /api/romanize {texts}`;
+  the **Local file + Downloaded labels** get **Romanize filename**, which renames
+  the file on disk (`POST /api/romanize/filename`, same `RevealRef` locator as
+  reveal) and repoints DB refs via `db.rename_file_link` (track link + workspace
+  ref + `tracks.filename`) + lyric sidecars, then rebuilds the catalog. Download
+  files rename only (located by ASCII `[id]`, preserved). Japanese-accurate;
+  Chinese falls back to Japanese on-yomi (a pykakasi limit, same as the reference).
+- **Review** right panel is **Embed | Lyrics** tabs (`LyricsView.vue` +
+  `lyrics.js`). Timestamped (LRC) lyrics highlight + auto-scroll to whichever
+  audio is playing — the local file or the YouTube candidate, only one at a time.
+  Every lyric viewer (`LyricsView`, so the Lyrics tab + `LyricsDialog`) has an
+  inline **Edit** (pencil → raw LRC textarea → Save). Review always shows the
+  workspace label (lyrics/metadata hub) even when the track isn't staged — its
+  actions then target the track, plus **Send to workspace**. Info + edit fields
+  live in the label menus (no separate top button). The "Your file" card also
+  shows duration/format + the file's own embedded tags (`/file-tags`).
+  An **approval checklist modal** (opens on Approve/Reject) records which parts
+  the reviewer verified-correct (YouTube / Local file / Lyrics / Metadata); each
+  box enables only when that part exists (yt_id / local file / lyrics found /
+  MusicBrainz match) and the modal's confirm does the write. Approve is
+  gated on **YouTube checked** (reject needs nothing); the checked parts are
+  stored in `decisions.checklist` (JSON) and shown as chips in Activity's
+  Decision history. `POST /api/decision` takes `checklist: [str]` and 400s an
+  approve missing `youtube`.
 - **Save to library** is one endpoint (`POST /api/workspace/save-to-library`
   `{ids}`) that routes each item server-side — carries an untracked file →
   Library track (any link carried onto it); link-only → saved link — so per-row
@@ -113,16 +171,43 @@ were merged into Library.
   destination; failed-download cleanup follows it), credentials, and tunable
   constants (all live in `settings.py` getters, not hardcoded): **Link finding**
   (`YT_SEARCH_TOP_N`, `TASK_DELAY_MIN/MAX`, `YT_MIN_SCORE`, `LOCAL_MIN_SCORE`,
-  `SEARCH_RESULT_LIMIT`) and **Advanced** (`DELETE_TOKEN_TTL`,
+  `MB_MIN_SCORE`, `MB_SEARCH_LIMIT`, `SEARCH_RESULT_LIMIT`) and **Advanced**
+  (`DELETE_TOKEN_TTL`,
   `CLEANUP_EXTENSIONS`).
 - A **download** (file in the download folder — matched by `[<id>]` in name, or
   a workspace item whose direct file ref lives in that folder) is distinct from a
   **local file** (mp3-folder catalog entry). A direct file ref is **untracked**
   only when it has no `track_id`. Never conflate.
+- **Download audio** runs the repo `downloader.py` subprocess (one global
+  `workspace_download` reservation, tracked as a `workspace_run`). Every download
+  button asks **format** first (`FormatDialog`: opus/mp3/m4a, `AUDIO_FORMAT` env).
+  Two paths, one core `_start_download_run(items, fmt, replace)`: Workspace **bulk**
+  (`/api/workspace/runs/download`, item-ids, skip-existing) and the shared
+  **YouTube-label** single (`POST /api/download/run {yt_ids, format, replace}`,
+  works off any yt_id on Workspace/Library/Review). Single sets `replace=True` →
+  downloader `YT_FORCE_REDOWNLOAD` re-downloads even a logged id and yt-dlp writes
+  `.part` first, so a failed download keeps the old file; on success the app drops
+  the stale old-format file (`_remove_stale_after_replace`, per-id pre/post
+  file-set diff). Frontend `useAudioDownload` (format modal + run poll +
+  dismissable `DownloadRunAlert`) is shared by all three screens.
+- **Delete** lives on the Downloaded label (simple confirm, app output,
+  `/api/download/delete`) and the Local file label + Workspace bulk. Two
+  mp3-folder-delete flows, both preview → token → typed `DELETE` → revalidate →
+  audit, differing only in the gate: **Library** is approved-only, by track id
+  (`/api/library/delete`, backend 409s non-`check==1`/non-unique). **Workspace**
+  is by item id (`/api/workspace/local-delete`), resolves each item's mp3-folder
+  file server-side (direct ref or linked track) and is **not** approval-gated —
+  the user curates in the Workspace — but still skips download-folder and
+  out-of-folder files (only configured-folder files are deletable). Both share
+  `useLocalDelete` (its `_kind` picks the endpoint); Workspace's bulk button
+  targets every selected item that carries a local file.
 - Folder containment and exact folder-plus-relative-path identity protect local
-  operations. Selected mp3-folder deletion is approved-only and requires
-  preview, short-lived token/manifest, typed `DELETE`, revalidation, and audit.
-  Download-file deletion is the app's own output — simple confirm, no token.
+  operations. mp3-folder deletion always requires preview, short-lived
+  token/manifest, typed `DELETE`, revalidation, and audit, and only ever touches
+  configured-folder files. Library's delete is additionally approved-only
+  (`check==1`); Workspace's bulk delete-local is not (the user curates there) but
+  is otherwise identical. Download-file deletion is the app's own output — simple
+  confirm, no token.
 - `explorer /select` reveal + native tkinter folder picker are localhost-only
   (server host = user machine).
 - Serve/open the app by hostname (`localhost`), never a bare IP: YouTube's

@@ -86,6 +86,19 @@ class WorkerTest(TasksTestBase):
         self.assertEqual(result["status"], "done")
         self.assertEqual(result["done"], 3)        # all counted, including the raiser
 
+    def test_outcome_counts_recorded(self):
+        def do_one(i):
+            if i == 2:
+                raise ValueError("boom")          # failed
+            if i == 3:
+                raise tasks.NetworkDown()         # skipped
+            return i == 1                          # flagged on 1
+        result = self.run_and_join("k", "v", [1, 2, 3, 4], do_one)
+        self.assertEqual((result["ok"], result["failed"], result["skipped"]), (2, 1, 1))
+        self.assertEqual(result["found"], 1)
+        self.assertIn("1 failed", result["message"])
+        self.assertIn("1 skipped", result["message"])
+
     def test_network_cutoff_stops_with_error(self):
         orig = tasks.NETWORK_FAIL_CUTOFF
         tasks.NETWORK_FAIL_CUTOFF = 3

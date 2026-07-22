@@ -131,7 +131,7 @@ class EndpointTest(ApiTestBase):
 
     def test_library_delete_token_and_audit_preserve_track_decision(self):
         self.assertEqual(self.client.post("/api/decision", json={
-            "track_id": self.ids["A.mp3"], "decision": True}).status_code, 200)
+            "track_id": self.ids["A.mp3"], "decision": True, "checklist": ["youtube"]}).status_code, 200)
         preview = self.client.post("/api/library/delete/preview", json={
             "track_ids": [self.ids["A.mp3"]]}).json()
         self.assertEqual(self.client.post("/api/library/delete", json={
@@ -143,7 +143,7 @@ class EndpointTest(ApiTestBase):
 
     def test_library_delete_rejects_confirmation_and_token_reuse(self):
         self.client.post("/api/decision", json={
-            "track_id": self.ids["A.mp3"], "decision": True})
+            "track_id": self.ids["A.mp3"], "decision": True, "checklist": ["youtube"]})
         preview = self.client.post("/api/library/delete/preview", json={
             "track_ids": [self.ids["A.mp3"]]}).json()
         bad = self.client.post("/api/library/delete", json={
@@ -155,6 +155,122 @@ class EndpointTest(ApiTestBase):
         reused = self.client.post("/api/library/delete", json={
             "track_ids": [self.ids["A.mp3"]], "token": preview["token"], "confirm": "DELETE"})
         self.assertEqual(reused.status_code, 409)
+
+    def test_workspace_local_delete_is_ungated_by_approval(self):
+        # Send an UNAPPROVED track to the Workspace, then bulk-delete its local file by item id.
+        # Unlike the Library flow this must NOT require a decision (the user curates in Workspace).
+        item = self.client.post("/api/workspace/library",
+                                json={"track_id": self.ids["A.mp3"]}).json()["item"]
+        self.assertIsNone(self.client.get(f"/api/track/{self.ids['A.mp3']}").json()["check"])
+        preview = self.client.post("/api/workspace/local-delete/preview",
+                                   json={"ids": [item["id"]]}).json()
+        self.assertEqual(len(preview["targets"]), 1)
+        r = self.client.post("/api/workspace/local-delete", json={
+            "ids": [item["id"]], "token": preview["token"], "confirm": "DELETE"})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(os.path.exists(os.path.join(main.MP3_FOLDERS[0], "A.mp3")))
+        self.assertEqual(self.client.get("/api/library/delete/audit").json()["audit"][0]["outcome"], "deleted")
+        # The track link is now unavailable, so the item's local_count -> 0 (the "local" label drops).
+        after = next(it for it in self.client.get("/api/workspace").json()["items"] if it["id"] == item["id"])
+        self.assertEqual(after["local_count"], 0)
+
+    def test_workspace_local_delete_removes_file_only_item(self):
+        # A file-only Workspace item (direct ref, no yt/track) whose file is deleted has no
+        # remaining identity, so it is removed — no dangling "local" label left behind.
+        rec = main._CATALOG.records[0]
+        added = self.client.post("/api/workspace/add-files", json={"files": [
+            {"folder_identity": rec["folder_identity"], "relative_path": rec["relative_path"]}]}).json()
+        item_id = added["results"][0]["workspace_item_id"]
+        preview = self.client.post("/api/workspace/local-delete/preview", json={"ids": [item_id]}).json()
+        self.assertEqual(len(preview["targets"]), 1)
+        self.client.post("/api/workspace/local-delete", json={
+            "ids": [item_id], "token": preview["token"], "confirm": "DELETE"})
+        ids = [it["id"] for it in self.client.get("/api/workspace").json()["items"]]
+        self.assertNotIn(item_id, ids)
+
+    def test_workspace_local_delete_typed_confirm_and_skips_linkless(self):
+        item = self.client.post("/api/workspace/library",
+                                json={"track_id": self.ids["A.mp3"]}).json()["item"]
+        # A link-only workspace item (no local file) is reported as skipped, not deleted.
+        linkless = self.client.post("/api/workspace/import", json={"text": "nolocal9999"}).json()["added"][0]
+        preview = self.client.post("/api/workspace/local-delete/preview",
+                                   json={"ids": [item["id"], linkless["id"]]}).json()
+        self.assertEqual(len(preview["targets"]), 1)
+        self.assertEqual(len(preview["skipped"]), 1)
+        bad = self.client.post("/api/workspace/local-delete", json={
+            "ids": [item["id"]], "token": preview["token"], "confirm": "nope"})
+        self.assertEqual(bad.status_code, 400)   # typed confirm still required
+        self.assertTrue(os.path.exists(os.path.join(main.MP3_FOLDERS[0], "A.mp3")))
+
+    def test_verify_link_dead_unreviews_approved_track(self):
+        tid = self.ids["A.mp3"]
+        db.apply_track_yt(tid, "vid00000000", {"title": "x"})   # give it a link, unreviewed
+        self.assertEqual(self.client.post("/api/decision", json={
+            "track_id": tid, "decision": True, "checklist": ["youtube"]}).status_code, 200)
+        self.assertEqual(self.client.get(f"/api/track/{tid}").json()["check"], 1)   # approved
+        with mock.patch.object(main, "_resolve_yt_metadata", return_value={"health": "dead"}):
+            r = self.client.post(f"/api/track/{tid}/verify-link")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["health"], "dead")
+        # dead link on an approved track -> back to unreviewed
+        self.assertIsNone(self.client.get(f"/api/track/{tid}").json()["check"])
+
+    def test_verify_link_alive_keeps_approval(self):
+        tid = self.ids["A.mp3"]
+        db.apply_track_yt(tid, "vid00000000", {"title": "x"})
+        self.client.post("/api/decision", json={"track_id": tid, "decision": True, "checklist": ["youtube"]})
+        with mock.patch.object(main, "_resolve_yt_metadata", return_value={"health": "ok"}):
+            self.client.post(f"/api/track/{tid}/verify-link")
+        self.assertEqual(self.client.get(f"/api/track/{tid}").json()["check"], 1)   # stays approved
+
+    def test_verify_local_reports_and_clears_missing(self):
+        tid = self.ids["A.mp3"]
+        self.assertTrue(self.client.post(f"/api/track/{tid}/verify-local").json()["present"])
+        os.remove(os.path.join(main.MP3_FOLDERS[0], "A.mp3"))
+        self.assertFalse(self.client.post(f"/api/track/{tid}/verify-local").json()["present"])
+
+    def test_verify_local_clears_direct_ref_workspace_item(self):
+        # A Workspace item pointing straight at a file (direct ref) must drop its own local
+        # ref when the file is gone — mark_links_unavailable alone can't (it's not a track link).
+        rec = main._CATALOG.records[0]
+        item = self.client.post("/api/workspace/add-files", json={"files": [
+            {"folder_identity": rec["folder_identity"], "relative_path": rec["relative_path"]}]}
+        ).json()["results"][0]
+        item_id = item["workspace_item_id"]
+        os.remove(os.path.join(main.MP3_FOLDERS[0], "A.mp3"))
+        self.assertFalse(self.client.post(f"/api/workspace/{item_id}/verify-local").json()["present"])
+        # file-only item whose file vanished -> removed (no dangling 'local' label left)
+        ids = [it["id"] for it in self.client.get("/api/workspace").json()["items"]]
+        self.assertNotIn(item_id, ids)
+
+    def test_verify_local_handles_out_of_folder_absolute_path(self):
+        # An out-of-folder file (referenced by absolute path, folder_identity = its own dir)
+        # verifies against that real path — present while it exists, cleared once removed.
+        outside = os.path.join(tempfile.mkdtemp(), "Elsewhere.mp3")
+        with open(outside, "wb") as f:
+            f.write(b"\xff\xfb\x90\x00" + b"\x00" * 64)
+        self.assertEqual(self.client.post("/api/files/add", json={
+            "paths": [outside], "target": "workspace"}).json()["added"], 1)
+        item_id = next(it["id"] for it in self.client.get("/api/workspace").json()["items"]
+                       if (it.get("relative_path") or "").endswith("Elsewhere.mp3"))
+        self.assertTrue(self.client.post(f"/api/workspace/{item_id}/verify-local").json()["present"])
+        os.remove(outside)
+        self.assertFalse(self.client.post(f"/api/workspace/{item_id}/verify-local").json()["present"])
+
+    def test_verify_labels_bulk_reuses_local_verify(self):
+        # Bulk "Verify labels" on a selection must clear a missing local file's label too, via the
+        # SAME core as the per-row verify (regression: the bulk path used to only do link + catalog).
+        rec = main._CATALOG.records[0]
+        self.assertEqual(self.client.post("/api/workspace/add-files", json={"files": [
+            {"folder_identity": rec["folder_identity"], "relative_path": rec["relative_path"]}]}
+        ).json()["added"], 1)
+        item_id = next(it["id"] for it in self.client.get("/api/workspace").json()["items"]
+                       if (it.get("relative_path") or "").endswith("A.mp3"))
+        os.remove(os.path.join(main.MP3_FOLDERS[0], "A.mp3"))
+        self.assertEqual(self.client.post("/api/tasks/verify/workspace",
+                                          json={"ids": [item_id]}).status_code, 200)
+        ids = [it["id"] for it in self.client.get("/api/workspace").json()["items"]]
+        self.assertNotIn(item_id, ids)   # file-only + file gone -> removed by the shared core
 
     def test_cleanup_downloads_requires_dedicated_route_and_coordinator(self):
         preview = self.client.post("/api/settings/cleanup-downloads/preview").json()
@@ -193,7 +309,7 @@ class EndpointTest(ApiTestBase):
         self.assertEqual(self.client.get(f"/api/track/{self.ids['A.mp3']}").json()["yt_id"],
                          "match123456")
         self.assertEqual(self.client.post("/api/decision", json={
-            "track_id": self.ids["A.mp3"], "decision": True}).json()["check"], 1)
+            "track_id": self.ids["A.mp3"], "decision": True, "checklist": ["youtube"]}).json()["check"], 1)
         conflict = dict(payload, track_id=self.ids["B.mp3"])
         self.assertEqual(self.client.post("/api/saved-links/match", json=conflict).status_code, 409)
 
@@ -225,13 +341,38 @@ class EndpointTest(ApiTestBase):
 
     def test_decision_updates_counts(self):
         r = self.client.post("/api/decision",
-                             json={"track_id": self.ids["A.mp3"], "decision": True})
+                             json={"track_id": self.ids["A.mp3"], "decision": True, "checklist": ["youtube"]})
         self.assertEqual(r.json()["check"], 1)
         self.assertEqual(self.client.get("/api/counts").json()["approved"], 1)
 
+    def test_approve_requires_youtube_checked(self):
+        # no checklist -> approve blocked
+        r = self.client.post("/api/decision",
+                             json={"track_id": self.ids["A.mp3"], "decision": True})
+        self.assertEqual(r.status_code, 400)
+        # reject needs nothing
+        self.assertEqual(self.client.post("/api/decision",
+            json={"track_id": self.ids["A.mp3"], "decision": False}).status_code, 200)
+
+    def test_checklist_recorded_and_listed(self):
+        self.client.post("/api/decision", json={
+            "track_id": self.ids["A.mp3"], "decision": True,
+            "checklist": ["youtube", "local", "lyrics"]})
+        hist = self.client.get("/api/history").json()["decisions"]
+        self.assertEqual(hist[0]["checklist"], ["youtube", "local", "lyrics"])
+
+    def test_track_decision_returns_latest_checklist(self):
+        tid = self.ids["A.mp3"]
+        self.client.post("/api/decision", json={"track_id": tid, "decision": False})
+        self.client.post("/api/decision", json={
+            "track_id": tid, "decision": True, "checklist": ["youtube", "metadata"]})
+        d = self.client.get(f"/api/track/{tid}/decision").json()
+        self.assertEqual(d["decision"], 1)
+        self.assertEqual(d["checklist"], ["youtube", "metadata"])
+
     def test_decision_unknown_track_404(self):
         r = self.client.post("/api/decision",
-                             json={"track_id": 999999, "decision": True})
+                             json={"track_id": 999999, "decision": True, "checklist": ["youtube"]})
         self.assertEqual(r.status_code, 404)
 
 
@@ -275,7 +416,7 @@ class WorkspaceApiTest(ApiTestBase):
         ).status_code, 200)
 
         decision = self.client.post("/api/decision", json={
-            "track_id": self.ids["A.mp3"], "decision": True,
+            "track_id": self.ids["A.mp3"], "decision": True, "checklist": ["youtube"],
         })
         self.assertEqual(decision.status_code, 200)
         promoted_a = self.client.post("/api/workspace/library", json={
@@ -481,6 +622,58 @@ class WorkspaceApiTest(ApiTestBase):
         finally:
             jobs.release_pipeline("other-pipeline")
 
+    def test_id_based_download_run_forces_replace_and_passes_format(self):
+        old_storage = main.RUN_STORAGE
+        storage = tempfile.TemporaryDirectory()
+        main.RUN_STORAGE = storage.name
+        captured = {}
+        original_start = jobs.start
+        jobs.start = lambda name, **kwargs: (captured.update(kwargs), {"name": name, "status": "running"})[1]
+        try:
+            response = self.client.post("/api/download/run",
+                                        json={"yt_ids": ["abcdefghij0", "abcdefghij0", ""], "format": "mp3"})
+            self.assertEqual(response.status_code, 200)
+            env = captured["env_overrides"]
+            self.assertEqual(env["AUDIO_FORMAT"], "mp3")
+            self.assertEqual(env["YT_FORCE_REDOWNLOAD"], "1")   # replace defaults True
+            # de-duplicated + blank dropped -> one snapshotted item
+            self.assertEqual(len(response.json()["items"]), 1)
+        finally:
+            jobs.start = original_start
+            jobs.release_pipeline("workspace_download")
+            main.RUN_STORAGE = old_storage
+            storage.cleanup()
+
+    def test_download_run_rejects_unknown_format(self):
+        r = self.client.post("/api/download/run", json={"yt_ids": ["abcdefghij0"], "format": "wav"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_download_run_requires_ids(self):
+        r = self.client.post("/api/download/run", json={"yt_ids": ["", "  "]})
+        self.assertEqual(r.status_code, 400)
+
+    def test_remove_stale_after_replace_only_when_new_file_landed(self):
+        tmp = tempfile.TemporaryDirectory()
+        old_path = os.path.join(tmp.name, "Song [vid11111111].opus")
+        new_path = os.path.join(tmp.name, "Song [vid11111111].mp3")
+        keep_path = os.path.join(tmp.name, "Other [vid22222222].opus")
+        for p in (old_path, new_path, keep_path):
+            with open(p, "w") as f:
+                f.write("x")
+        original = main._download_files_for_id
+        # id vid1: old + new both present (format changed) -> old must go.
+        # id vid2: only its original present (that id "failed") -> keep it.
+        main._download_files_for_id = lambda yt_id: (
+            [old_path, new_path] if yt_id == "vid11111111" else [keep_path])
+        try:
+            main._remove_stale_after_replace({"vid11111111": {old_path}, "vid22222222": {keep_path}})
+            self.assertFalse(os.path.exists(old_path))   # stale old-format removed
+            self.assertTrue(os.path.exists(new_path))     # freshly downloaded kept
+            self.assertTrue(os.path.exists(keep_path))    # no new file for vid2 -> untouched
+        finally:
+            main._download_files_for_id = original
+            tmp.cleanup()
+
     def test_startup_cleanup_is_contained_to_run_storage(self):
         old_storage = main.RUN_STORAGE
         storage = tempfile.TemporaryDirectory()
@@ -534,7 +727,7 @@ class CurationLeaseApiTest(ApiTestBase):
     def test_decision_and_export_rejected_during_pipeline_lease(self):
         decision = self.client.post(
             "/api/decision",
-            json={"track_id": self.ids["A.mp3"], "decision": True},
+            json={"track_id": self.ids["A.mp3"], "decision": True, "checklist": ["youtube"]},
         )
         self.assertEqual(decision.status_code, 409)
         export = self.client.post("/api/export")
@@ -722,10 +915,10 @@ class AutoExportTest(ApiTestBase):
         main.AUTO_EXPORT_EVERY = 2
         main._decision_count = 0
         r1 = self.client.post("/api/decision",
-                             json={"track_id": self.ids["A.mp3"], "decision": True})
+                             json={"track_id": self.ids["A.mp3"], "decision": True, "checklist": ["youtube"]})
         self.assertNotIn("auto_exported", r1.json())     # 1st: no export yet
         r2 = self.client.post("/api/decision",
-                             json={"track_id": self.ids["B.mp3"], "decision": True})
+                             json={"track_id": self.ids["B.mp3"], "decision": True, "checklist": ["youtube"]})
         self.assertTrue(r2.json().get("auto_exported"))   # 2nd: fired
         # and the marks were written to the csv
         out = pd.read_csv(db.MATCHES_CSV)
@@ -872,7 +1065,7 @@ class LibraryApiTest(ApiTestBase):
 
     def test_state_follows_decision(self):
         self.client.post("/api/decision",
-                         json={"track_id": self.ids["A.mp3"], "decision": True})
+                         json={"track_id": self.ids["A.mp3"], "decision": True, "checklist": ["youtube"]})
         rows = self.client.get("/api/library").json()["rows"]
         state = {r["filename"]: r["state"] for r in rows}
         self.assertEqual(state["A.mp3"], "confirmed")   # check wins over derived state
@@ -1032,7 +1225,7 @@ class BackgroundVerifyTest(ApiTestBase):
 
     def test_history_lists_decisions(self):
         rows = self.client.get("/api/rows?status=all&limit=5").json()["rows"]
-        self.client.post("/api/decision", json={"track_id": rows[0]["id"], "decision": 1})
+        self.client.post("/api/decision", json={"track_id": rows[0]["id"], "decision": 1, "checklist": ["youtube"]})
         hist = self.client.get("/api/history").json()["decisions"]
         self.assertEqual(hist[0]["decision"], 1)
         self.assertEqual(hist[0]["track_id"], rows[0]["id"])
@@ -1448,6 +1641,149 @@ class SettingsGetterTest(unittest.TestCase):
             self.assertEqual(settings.cleanup_extensions(), (".mp4", ".webm", ".part"))
         with mock.patch.object(settings, "get", side_effect=envget({})):
             self.assertIn(".webm", settings.cleanup_extensions())   # falls back to defaults
+
+    def test_mb_min_score_clamped(self):
+        def envget(values):
+            return lambda k, d=None: values.get(k, d)
+        with mock.patch.object(settings, "get", side_effect=envget({"MB_MIN_SCORE": "150"})):
+            self.assertEqual(settings.mb_min_score(), 100)
+        with mock.patch.object(settings, "get", side_effect=envget({})):
+            self.assertEqual(settings.mb_min_score(), 90)
+
+    def test_mb_search_limit_clamped(self):
+        def envget(values):
+            return lambda k, d=None: values.get(k, d)
+        with mock.patch.object(settings, "get", side_effect=envget({"MB_SEARCH_LIMIT": "99"})):
+            self.assertEqual(settings.mb_search_limit(), 25)
+        with mock.patch.object(settings, "get", side_effect=envget({})):
+            self.assertEqual(settings.mb_search_limit(), 5)
+
+
+class LyricsMetadataApiTest(ApiTestBase):
+    """Lyrics + metadata finding. The online providers (lyrics_fetch / MusicBrainz) are
+    stubbed so no test hits the network; storage + apply are exercised for real."""
+
+    def _import_item(self):
+        added = self.client.post("/api/workspace/import", json={"text": "songid12345"}).json()["added"]
+        return added[0]["id"]
+
+    def test_find_lyrics_stores_and_get_serves_cached(self):
+        item_id = self._import_item()
+        synced = "[00:01.00]la la\n[00:03.00]la"
+        orig = main._fetch_lyrics
+        main._fetch_lyrics = lambda a, t: synced
+        try:
+            found = self.client.post(f"/api/workspace/{item_id}/lyrics").json()
+        finally:
+            main._fetch_lyrics = orig
+        self.assertTrue(found["found"])
+        self.assertTrue(found["synced"])
+        # Stored on the item, so a plain GET returns it without re-fetching (stub restored).
+        got = self.client.get(f"/api/workspace/{item_id}/lyrics").json()
+        self.assertEqual(got["lyrics"], synced)
+        item = next(i for i in self.client.get("/api/workspace").json()["items"] if i["id"] == item_id)
+        self.assertEqual(json.loads(item["metadata_json"])["lyrics"], synced)
+
+    def test_find_lyrics_reports_none(self):
+        item_id = self._import_item()
+        orig = main._fetch_lyrics
+        main._fetch_lyrics = lambda a, t: ""
+        try:
+            found = self.client.post(f"/api/workspace/{item_id}/lyrics").json()
+        finally:
+            main._fetch_lyrics = orig
+        self.assertFalse(found["found"])
+
+    def test_lyrics_read_from_sidecar_without_network(self):
+        # A workspace file item pointing at A.mp3; its .lrc sidecar is served as-is.
+        folder = settings.configured_mp3_folders()[0]
+        self.client.post("/api/workspace/add-files",
+                         json={"files": [{"folder_identity": folder, "relative_path": "A.mp3"}]})
+        item = next(i for i in self.client.get("/api/workspace").json()["items"] if i.get("relative_path") == "A.mp3")
+        sidecar = os.path.splitext(os.path.join(item["folder_identity"], item["relative_path"]))[0] + ".lrc"
+        with open(sidecar, "w", encoding="utf-8") as f:
+            f.write("[00:00.50]hello")
+        orig = main._fetch_lyrics
+        main._fetch_lyrics = lambda a, t: (_ for _ in ()).throw(AssertionError("network hit"))
+        try:
+            got = self.client.get(f"/api/workspace/{item['id']}/lyrics").json()
+        finally:
+            main._fetch_lyrics = orig
+        self.assertTrue(got["found"] and got["synced"])
+        self.assertIn("hello", got["lyrics"])
+
+    def test_find_metadata_applies_best_above_floor(self):
+        item_id = self._import_item()
+        orig = main._mb_best
+        main._mb_best = lambda a, t: {"artist": "MB Artist", "title": "MB Title", "score": 95}
+        try:
+            with mock.patch.object(settings, "mb_min_score", return_value=90):
+                updated = self.client.post(f"/api/workspace/{item_id}/find-metadata").json()
+            self.assertEqual(updated["title"], "MB Title")
+            self.assertEqual(updated["channel"], "MB Artist")
+            # Below the floor -> 404, nothing applied.
+            main._mb_best = lambda a, t: {"artist": "X", "title": "Y", "score": 50}
+            with mock.patch.object(settings, "mb_min_score", return_value=90):
+                resp = self.client.post(f"/api/workspace/{item_id}/find-metadata")
+            self.assertEqual(resp.status_code, 404)
+        finally:
+            main._mb_best = orig
+
+    def test_save_lyrics_persists_on_workspace_item(self):
+        item_id = self._import_item()
+        self.client.post(f"/api/workspace/{item_id}/lyrics/save", json={"lyrics": "[00:02.00]edited"})
+        got = self.client.get(f"/api/workspace/{item_id}/lyrics").json()
+        self.assertEqual(got["lyrics"], "[00:02.00]edited")
+        self.assertTrue(got["synced"])
+
+    def test_find_metadata_generic_applies_to_track_columns(self):
+        # Same generic endpoint, kind='track' -> writes the artist/title columns.
+        track_id = self.ids["A.mp3"]
+        orig = main._mb_best
+        main._mb_best = lambda a, t: {"artist": "Track Artist", "title": "Track Title", "score": 99}
+        try:
+            with mock.patch.object(settings, "mb_min_score", return_value=90):
+                updated = self.client.post(f"/api/track/{track_id}/find-metadata").json()
+        finally:
+            main._mb_best = orig
+        self.assertEqual(updated["artist"], "Track Artist")
+        self.assertEqual(updated["title"], "Track Title")
+
+
+class RomanizeTest(ApiTestBase):
+    def test_romanize_text_endpoint(self):
+        r = self.client.post("/api/romanize", json={
+            "texts": ["残酷な天使", "hello", "[00:12.34]夜に駆ける"]}).json()
+        self.assertEqual(r["texts"][0], "zankoku na tenshi")
+        self.assertEqual(r["texts"][1], "hello")               # ascii untouched
+        self.assertTrue(r["texts"][2].startswith("[00:12.34]"))  # LRC prefix preserved
+
+    def test_romanize_filename_renames_and_repoints(self):
+        folder = main.MP3_FOLDERS[0]
+        p = os.path.join(folder, "残酷な天使.mp3")
+        with open(p, "wb") as f:
+            f.write(self.audio_bytes)
+        main._install_catalog(main._build_file_catalog(main.MP3_FOLDERS))
+        self.assertEqual(self.client.post(
+            "/api/files/add", json={"paths": [p], "target": "library"}).json()["added"], 1)
+        tid = next(row["id"] for row in self.client.get("/api/rows?status=all").json()["rows"]
+                   if row["filename"] == "残酷な天使.mp3")
+
+        r = self.client.post("/api/romanize/filename", json={"track_id": tid}).json()
+        self.assertTrue(r["renamed"])
+        self.assertEqual(r["name"], "zankoku na tenshi.mp3")
+        self.assertFalse(os.path.exists(p))
+        self.assertTrue(os.path.exists(os.path.join(folder, "zankoku na tenshi.mp3")))
+        # link repointed: resolving the same track now finds an already-romanized name
+        again = self.client.post("/api/romanize/filename", json={"track_id": tid}).json()
+        self.assertFalse(again["renamed"])
+        self.assertEqual(again["name"], "zankoku na tenshi.mp3")
+
+    def test_romanize_filename_ascii_is_noop(self):
+        r = self.client.post("/api/romanize/filename", json={
+            "track_id": self.ids["A.mp3"]}).json()
+        self.assertFalse(r["renamed"])
+        self.assertTrue(os.path.exists(os.path.join(main.MP3_FOLDERS[0], "A.mp3")))
 
 
 if __name__ == "__main__":

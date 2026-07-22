@@ -24,7 +24,8 @@ export const api = {
   libraryRemove: (track_ids) => jpost('/api/library/remove', { track_ids }),
   unreviewTrack: (id) => jpost('/api/library/unreview', { track_ids: [id] }),
   track: (id) => jget(`/api/track/${id}`),
-  decide: (track_id, decision) => jpost('/api/decision', { track_id, decision }),
+  decide: (track_id, decision, checklist) => jpost('/api/decision', { track_id, decision, checklist }),
+  trackDecision: (id) => jget(`/api/track/${id}/decision`),
   export: () => jpost('/api/export'),
   audioUrl: (id) => `/api/audio/${id}`,
   ytAudioUrl: (ytId) => `/api/yt_audio/${ytId}`,
@@ -72,20 +73,28 @@ export const api = {
   untracked: () => jget('/api/untracked'),
   deletePreview: (track_ids) => jpost('/api/library/delete/preview', { track_ids }),
   deleteTracks: (body) => jpost('/api/library/delete', body),
+  // Workspace bulk delete-local: by item id, resolves each item's mp3-folder file server-side
+  // (no approval gate; download/out-of-folder files are skipped). Same token/typed-DELETE flow.
+  workspaceLocalDeletePreview: (ids) => jpost('/api/workspace/local-delete/preview', { ids }),
+  workspaceLocalDelete: (body) => jpost('/api/workspace/local-delete', body),
   deleteAudit: () => jget('/api/library/delete/audit'),
   cleanupPreview: () => jpost('/api/settings/cleanup-downloads/preview'),
   cleanupDownloads: (body) => jpost('/api/settings/cleanup-downloads', body),
-  workspaceDownloadRun: (ids) => jpost('/api/workspace/runs/download', { ids }),
+  workspaceDownloadRun: (ids, format = 'opus') => jpost('/api/workspace/runs/download', { ids, format }),
+  // Download YouTube ids straight to the download folder (the YouTube-label button); replace-on-success.
+  downloadRun: (yt_ids, format = 'opus', replace = true) => jpost('/api/download/run', { yt_ids, format, replace }),
   workspaceRun: (id) => jget(`/api/workspace/runs/${id}`),
   workspaceRuns: () => jget('/api/workspace/runs'),
 
   // background tasks (verify sweeps) + Activity log
   tasks: () => jget('/api/tasks'),
   taskCancel: (id) => jpost(`/api/tasks/${id}/cancel`),
-  verifyLibraryTask: (scope) => jpost('/api/tasks/verify/library', { scope }),
-  verifyWorkspaceTask: (scope) => jpost('/api/tasks/verify/workspace', { scope }),
+  verifyLibraryTask: (scope, ids = null) => jpost('/api/tasks/verify/library', { scope, ids }),
+  verifyWorkspaceTask: (scope, ids = null) => jpost('/api/tasks/verify/workspace', { scope, ids }),
   findYoutubeWorkspaceTask: (ids = null) => jpost('/api/tasks/find-youtube/workspace', { ids }),
   findLocalWorkspaceTask: (ids = null) => jpost('/api/tasks/find-local/workspace', { ids }),
+  findLyricsWorkspaceTask: (ids = null) => jpost('/api/tasks/find-lyrics/workspace', { ids }),
+  findMetadataWorkspaceTask: (ids = null) => jpost('/api/tasks/find-metadata/workspace', { ids }),
   reviewFindYoutube: (track_id) => jpost('/api/review/find-youtube', { track_id }),
   // interactive search pickers (ranked candidates, user chooses)
   searchYoutube: (body) => jpost('/api/search/youtube', body),
@@ -102,6 +111,20 @@ export const api = {
   // embed our metadata into the file's tags (source: 'local' | 'download')
   workspaceEmbed: (id, source = 'local') => jpost(`/api/workspace/${id}/embed`, { source }),
   trackEmbed: (id, source = 'local') => jpost(`/api/track/${id}/embed`, { source }),
+  // lyrics + metadata finding — generic over kind ('track' | 'workspace'), like /embed.
+  // Bulk (workspace) via the *Task methods above.
+  entityLyrics: (kind, id, refresh = false) => jget(`/api/${kind}/${id}/lyrics${refresh ? '?refresh=true' : ''}`),
+  entityFindLyrics: (kind, id) => jpost(`/api/${kind}/${id}/lyrics`),
+  entitySaveLyrics: (kind, id, lyrics) => jpost(`/api/${kind}/${id}/lyrics/save`, { lyrics }),
+  entityFindMetadata: (kind, id) => jpost(`/api/${kind}/${id}/find-metadata`),
+  entityFileTags: (kind, id) => jget(`/api/${kind}/${id}/file-tags`),
+  // per-row label verification (YouTube link health / local-file & downloaded-file existence)
+  entityVerifyLink: (kind, id) => jpost(`/api/${kind}/${id}/verify-link`),
+  entityVerifyLocal: (kind, id) => jpost(`/api/${kind}/${id}/verify-local`),
+  entityVerifyDownload: (kind, id) => jpost(`/api/${kind}/${id}/verify-download`),
+  // romanize CJK -> Latin (Hepburn). `texts` in, romanized texts out; filename renames on disk.
+  romanize: (texts) => jpost('/api/romanize', { texts }),
+  romanizeFilename: (ref) => jpost('/api/romanize/filename', ref),
   history: (limit = 200) => jget(`/api/history?limit=${limit}`),
 
   // pipeline scripts (background jobs)

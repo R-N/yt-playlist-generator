@@ -13,7 +13,7 @@ vi.mock('./api', () => ({
 import { api } from './api'
 import {
   useLabelFilter, usePagination, useSelection, ytUrl, fileMenuItems,
-  usePreview, useRowActions,
+  usePreview, useRowActions, withNewBase,
   ytMenuItems, libraryLabelMenu, workspaceLabelMenu,
 } from './curation'
 
@@ -25,6 +25,11 @@ describe('label menu builders', () => {
       expect.objectContaining({ action: 'copyid', title: 'Copy ID · dQw4w9WgXcQ' }))
     expect(actions(ytMenuItems(null))).not.toContain('copyid')
   })
+  it('ytMenuItems offers Download + Verify link only when an id exists', () => {
+    expect(actions(ytMenuItems('dQw4w9WgXcQ'))).toEqual(expect.arrayContaining(['download', 'verify-link']))
+    expect(actions(ytMenuItems(null))).not.toContain('download')
+    expect(actions(ytMenuItems(null))).not.toContain('verify-link')
+  })
   it('libraryLabelMenu hides Send-to-workspace when already in workspace and Show-in-library on the library screen', () => {
     expect(actions(libraryLabelMenu({ trackId: 5, onScreen: 'workspace', inWorkspace: false })))
       .toEqual(['info', 'send-workspace', 'review', 'show-library', 'remove-library'])
@@ -32,10 +37,11 @@ describe('label menu builders', () => {
       .toEqual(['info', 'review', 'remove-library'])   // send-workspace + show-library both dropped
   })
   it('workspaceLabelMenu hides Save-to-library when already in library and Show-in-workspace on the workspace screen', () => {
+    // Lyrics/metadata finding live in this menu between save-library and show/remove.
     expect(actions(workspaceLabelMenu({ onScreen: 'library', inLibrary: false })))
-      .toEqual(['info', 'save-library', 'show-workspace', 'remove-workspace'])
+      .toEqual(['info', 'save-library', 'find-lyrics', 'view-lyrics', 'find-metadata', 'show-workspace', 'remove-workspace'])
     expect(actions(workspaceLabelMenu({ onScreen: 'workspace', inLibrary: true })))
-      .toEqual(['info', 'remove-workspace'])
+      .toEqual(['info', 'find-lyrics', 'view-lyrics', 'find-metadata', 'remove-workspace'])
   })
 })
 
@@ -88,6 +94,14 @@ describe('useSelection', () => {
   })
 })
 
+describe('withNewBase', () => {
+  it('swaps only the basename, keeping either-separator dir prefix; bare name is replaced whole', () => {
+    expect(withNewBase('a/b/古い.mp3', 'new.mp3')).toBe('a/b/new.mp3')
+    expect(withNewBase('a\\b\\古い.mp3', 'new.mp3')).toBe('a\\b\\new.mp3')
+    expect(withNewBase('古い.mp3', 'new.mp3')).toBe('new.mp3')
+  })
+})
+
 describe('ytUrl', () => {
   it('prefers explicit url, else builds from youtube_id or yt_id, else null', () => {
     expect(ytUrl({ youtube_url: 'http://x' })).toBe('http://x')
@@ -99,7 +113,7 @@ describe('ytUrl', () => {
 
 describe('fileMenuItems', () => {
   it('adds a source-labelled delete row only when deletable', () => {
-    expect(fileMenuItems().map((i) => i.action)).toEqual(['play', 'info', 'reveal'])
+    expect(fileMenuItems().map((i) => i.action)).toEqual(['play', 'info', 'reveal', 'verify-local', 'romanize-filename'])
     const del = fileMenuItems({ deletable: true, source: 'download' }).at(-1)
     expect(del.action).toBe('delete')
     expect(del.title).toBe('Delete downloaded file')

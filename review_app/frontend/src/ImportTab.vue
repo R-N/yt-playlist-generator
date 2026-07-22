@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { api } from './api'
 import { invalidateData } from './nav'
 import { parsePaste } from './import'
-import { useSelection, usePagination, useRowActions, useFilePicker, fileMenuItems, untrackedMenuItems } from './curation'
+import { useSelection, usePagination, useRowActions, useFilePicker, fileMenuItems, untrackedMenuItems, withNewBase } from './curation'
 import { buildLabels } from './labels'
 import CurationList from './CurationList.vue'
 import ActionMenu from './ActionMenu.vue'
@@ -28,11 +28,12 @@ const listRows = computed(() => paged.value.map((file) => ({
   fileSrc: api.localAudioUrl(file.folder_identity, file.relative_path),
   revealArg: () => ({ folder_identity: file.folder_identity, relative_path: file.relative_path }),
   infoFor: () => ({ title: 'File info', lines: [['File', file.basename], ['Path', file.relative_path]] }),
+  onRenamed: (name) => { file.basename = name; file.relative_path = withNewBase(file.relative_path, name) },   // patch in place, no reload
 })))
 const FILE_MENU_ITEMS = fileMenuItems()   // no delete row for untracked files
 const fileMenu = ref({ open: false, target: [0, 0], row: null })
 const untrackedMenu = ref({ open: false, target: [0, 0], row: null })
-const { preview, fileInfo, fileAction } = useRowActions({ onError: (e) => { error.value = String(e) } })
+const { preview, fileInfo, fileAction } = useRowActions({ onError: (e) => { error.value = String(e) }, onNotice: (m) => { fileNotice.value = m }, reload: () => loadUntracked() })
 // 'untracked' badge -> add/send; other badges (local file) -> play/info/reveal.
 function onLabel(row, label, ev) {
   const target = [ev.clientX, ev.clientY]

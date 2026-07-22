@@ -2,9 +2,9 @@
 import { ref, computed, onMounted } from 'vue'
 import { api } from './api'
 import { reviewTrack, activeTab, invalidateData, libraryFocusIds, useTabRefresh } from './nav'
-import { deletionMessage, formatBytes } from './workspace'
+import { formatBytes } from './workspace'
 import { buildLabels, FILTER_ATTRS, matchesLabelFilter } from './labels'
-import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, untrackedMenuItems, libraryLabelMenu, workspaceLabelMenu, fileMenuItems, downloadMenuItems } from './curation'
+import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, useAudioDownload, useLocalDelete, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, untrackedMenuItems, libraryLabelMenu, workspaceLabelMenu, fileMenuItems, downloadMenuItems, withNewBase } from './curation'
 import CurationList from './CurationList.vue'
 import VerifyScopeDialog from './VerifyScopeDialog.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
@@ -12,6 +12,9 @@ import ActionMenu from './ActionMenu.vue'
 import SearchPickerDialog from './SearchPickerDialog.vue'
 import ForceSetDialog from './ForceSetDialog.vue'
 import InfoEditDialog from './InfoEditDialog.vue'
+import FormatDialog from './FormatDialog.vue'
+import DownloadRunAlert from './DownloadRunAlert.vue'
+import LyricsDialog from './LyricsDialog.vue'
 import InfoDialog from './InfoDialog.vue'
 import TypedConfirmDialog from './TypedConfirmDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -29,19 +32,14 @@ const matching = ref(null)
 const addingFiles = ref(false)
 const error = ref('')
 const notice = ref('')
-const deletePreview = ref(null)
 const matchingLink = ref(null)
 const matchFile = ref(null)
-const audit = ref([])
-const deleteBusy = ref(false)
-const deleteOutcome = ref('')
 const verifying = ref(false)
 const verifyDialog = ref(false)
 const removeConfirm = ref(null)   // { ids, count } pending confirmation
 const removing = ref(false)
 const ytMenu = ref({ open: false, target: [0, 0], row: null })
 const fileMenu = ref({ open: false, target: [0, 0], row: null, source: 'local' })
-const downloadDeleteConfirm = ref(null)
 const statusMenu = ref({ open: false, target: [0, 0], row: null })
 const untrackedMenu = ref({ open: false, target: [0, 0], row: null })
 const ytMenuState = ref({ items: YT_MENU_ITEMS })
@@ -56,15 +54,18 @@ const { preview, fileInfo, ytAction, fileAction, statusAction } = useRowActions(
   onNotice: (m) => { notice.value = m },
   openReview: (row) => openReview(row.raw),
   deleteFile: (row, source) => deleteFile(row, source),
+  reload: async () => { invalidateData(); await load() },
 })
 // Membership-label actions (In Library / In Workspace). Remove-from-library routes to
 // the typed confirm; remove-from-workspace drops the workspace item (files untouched).
 const membership = useMembershipActions({
   onError: (e) => { error.value = String(e) },
+  onNotice: (m) => { notice.value = m },
   reload: load,
   removeLibrary: (trackId) => askRemove([trackId]),
   removeWorkspace: async (itemId) => { try { await api.workspaceRemove([itemId]); invalidateData(); await load() } catch (e) { error.value = String(e) } },
 })
+const lyrics = ref({ open: false, kind: 'workspace', id: null, title: '' })
 // Interactive "Find on YouTube" / "Find local file" pickers (see SearchPickerDialog).
 const { picker, openYoutube, openLocal, onPick } = useSearchPicker({
   onError: (e) => { error.value = String(e) }, reload: load,
@@ -72,6 +73,15 @@ const { picker, openYoutube, openLocal, onPick } = useSearchPicker({
 // Force-set: "Set YouTube link…" / "Pick local file…" (verify + confirm w/ score).
 const { fset, openSetYoutube, pickLocalFile, apply: applyForceSet, setValue: setForceValue } = useForceSet({
   onError: (e) => { error.value = String(e) }, reload: load,
+})
+// Single-item download (YouTube-label button) + shared file-delete flows (curation.js).
+// Download finish → light refresh of just the track rows (downloaded label), not the full
+// 4-way load (saved links + local files + workspace).
+const { fmtDialog: dlFmt, dlRun, askDownload, chooseFormat, dismissRun } = useAudioDownload({
+  onError: (e) => { error.value = String(e) }, onNotice: (m) => { notice.value = m }, reload: refreshRows,
+})
+const { deletePreview, deleteBusy, deleteOutcome, audit, downloadConfirm, previewLocal, confirmLocal, askDownloadDelete, confirmDownloadDelete } = useLocalDelete({
+  onError: (e) => { error.value = String(e) }, onNotice: (m) => { notice.value = m }, reload: load,
 })
 const trackEntity = (row) => ({ kind: 'track', id: row.id, artist: trackAuthor(row.raw), title: row.raw.title || row.raw.yt_title || row.raw.filename || '' })
 const info = ref({ open: false, title: '', data: {}, editable: [] })
@@ -82,8 +92,15 @@ async function openInfo(row) {
   } catch (e) { error.value = String(e) }
 }
 async function saveInfo(fields) {
-  try { await api.trackPatch(info.value.data.id, fields); info.value.open = false; invalidateData(); await load() }
-  catch (e) { error.value = String(e) }
+  // info.value.data is a detached copy (api.track) — patch it AND the visible row in rows.value.
+  // Peers refresh on re-entry (nav.useTabRefresh), so no reload/invalidateData needed here.
+  try {
+    await api.trackPatch(info.value.data.id, fields)
+    Object.assign(info.value.data, fields)
+    const r = rows.value.find((x) => x.id === info.value.data.id)
+    if (r) Object.assign(r, fields)
+    info.value.open = false
+  } catch (e) { error.value = String(e) }
 }
 
 // Title falls back file name -> fetched YouTube title -> id; never blank.
@@ -154,6 +171,7 @@ const listRows = computed(() => paged.value.map((e) => ({
   // Action contract read by useRowActions.
   ytUrl: ytUrl(e.raw), ytId: entryYtId(e),
   trackId: e.kind === 'track' ? e.id : null,
+  verifyKind: e.kind === 'track' ? 'track' : null, verifyId: e.kind === 'track' ? e.id : null,
   setCheck: (v) => { const r = rows.value.find((x) => x.id === e.id); if (r) r.check = v },
   embed: e.kind === 'track' ? (source) => api.trackEmbed(e.id, source) : null,
   fileSrc: localSrc(e), downloadSrc: entryYtId(e) ? api.downloadAudioUrl(entryYtId(e)) : null,
@@ -165,6 +183,11 @@ const listRows = computed(() => paged.value.map((e) => ({
     : e.kind === 'file'
       ? { title: 'File info', lines: [['File', e.raw.basename], ['Path', e.raw.relative_path], ['Size', formatBytes(e.raw.file_size)]] }
       : { title: 'File info', lines: [['File', e.raw.filename], ['Artist', e.raw.artist || '—'], ['Title', e.raw.title || '—'], ['Duration', e.raw.duration ? `${Math.round(e.raw.duration)}s` : '—']] },
+  onRenamed: (name, source) => {   // patch this row in place after Romanize filename (no full reload)
+    if (source === 'download') return
+    if (e.kind === 'file') { e.raw.basename = name; e.raw.relative_path = withNewBase(e.raw.relative_path, name) }
+    else if (e.kind === 'track') e.raw.filename = name
+  },
 })))
 const selectableKeys = computed(() => filtered.value.filter((entry) => entry.kind !== 'saved').map((entry) => entry.key))
 const { selected, allSelected: allVisible, toggle, toggleAll } = useSelection(selectableKeys)
@@ -182,6 +205,11 @@ async function load() {
   } catch (e) { error.value = String(e) }
   finally { loading.value = false }
 }
+// Light refresh: just the track rows (e.g. a download finished → downloaded label), no
+// spinner, no saved-links/local-files/workspace refetch.
+async function refreshRows() {
+  try { rows.value = (await api.library()).rows } catch (e) { error.value = String(e) }
+}
 // Add absolute-path files straight into the Library as tracks; shared picker.
 const { picking, pickFiles } = useFilePicker({
   target: 'library',
@@ -189,14 +217,20 @@ const { picking, pickFiles } = useFilePicker({
   onError: (e) => { error.value = String(e) },
 })
 // Verify is a paced background task now (see Activity). scope: 'all' | 'unverified'.
-async function startVerify(scope) {
+async function startVerify(scope, ids = null) {
   verifying.value = true; error.value = ''
   try {
-    await api.verifyLibraryTask(scope)
+    await api.verifyLibraryTask(scope, ids)
     verifyDialog.value = false
     activeTab.value = 'activity'
   } catch (e) { error.value = e.message?.includes('409') ? 'A verify task is already running (see Activity).' : String(e) }
   finally { verifying.value = false }
+}
+// Verify labels: re-check the SELECTED tracks' link health + local/download (dead link on an
+// approved track -> unreviewed). No selection -> ask scope (all vs unverified).
+function startVerifyLabels() {
+  if (selectedTrackIds.value.length) startVerify('all', selectedTrackIds.value)
+  else verifyDialog.value = true
 }
 function askRemove(ids) { if (ids.length) removeConfirm.value = { ids, count: ids.length } }
 async function confirmRemove() {
@@ -235,10 +269,12 @@ function onFileMenu(mode, row, source) {
 function onYtMenu(mode, row) {
   if (mode === 'find-local') openLocal({ title: trackTitle(row.raw), query: trackTitle(row.raw), target: { kind: 'track', id: row.id } })
   else if (mode === 'pick-local') pickLocalFile(trackEntity(row))
+  else if (mode === 'download') askDownload([row.ytId])
   else ytAction(mode, row)
 }
 function onMemberMenu(mode) {
   if (mode === 'info') openInfo(memberMenu.value.row)
+  else if (mode === 'view-lyrics') lyrics.value = { open: true, kind: 'workspace', id: memberMenu.value.label.workspaceItemId, title: trackTitle(memberMenu.value.row.raw) }
   else membership.run(mode, memberMenu.value.label)
 }
 async function untrackedAction(mode) {
@@ -257,23 +293,13 @@ async function sendFileToWorkspace(file) {
   } catch (e) { error.value = String(e) }
   finally { matching.value = null }
 }
-// File menu items are built per-row in onLabel (source picks the delete wording;
-// canFindYoutube adds the picker). Delete branches live in the shared fileAction.
 // Injected into useRowActions.fileAction. Download = simple confirm (app output);
-// mp3-folder file = approved-delete flow; untracked file must be added first.
+// mp3-folder file = approved-delete flow (both live in useLocalDelete); untracked file
+// has no Library row so it must be added first.
 function deleteFile(row, source) {
-  if (source === 'download') { downloadDeleteConfirm.value = { row }; return }
+  if (source === 'download') { askDownloadDelete([row.ytId]); return }
   if (row.kind === 'file') { error.value = 'Add this file to Library first to manage its deletion.'; return }
-  previewDeleteOne(row)
-}
-async function previewDeleteOne(row) {
-  try { deletePreview.value = await api.deletePreview([row.id]) }
-  catch (e) { error.value = String(e) }
-}
-async function confirmDownloadDelete() {
-  const row = downloadDeleteConfirm.value.row; downloadDeleteConfirm.value = null
-  try { await api.downloadDelete([row.ytId]); notice.value = 'Downloaded file deleted.'; invalidateData(); await load() }
-  catch (e) { error.value = String(e) }
+  previewLocal([row.id])
 }
 async function openReview(row) {
   opening.value = row.id
@@ -322,26 +348,7 @@ async function addSelectedFiles() {
   try { const r = await api.addFilesToLibrary(selectedFileRefs.value); notice.value = `Added ${r.added} to Library.`; selected.value = []; invalidateData(); await load() }
   catch (e) { error.value = String(e) } finally { addingFiles.value = false }
 }
-async function previewDelete() {
-  if (!deletable.value.length) return
-  try { deletePreview.value = await api.deletePreview(deletable.value.map((row) => row.id)) }
-  catch (e) { error.value = String(e) }
-}
-async function confirmDelete() {
-  if (!deletePreview.value) return
-  try {
-    deleteBusy.value = true
-    const result = await api.deleteTracks({ track_ids: deletePreview.value.targets.map((target) => target.track_id), token: deletePreview.value.token, confirm: 'DELETE' })
-    deleteOutcome.value = deletionMessage(result)
-    invalidateData()
-    deletePreview.value = null; audit.value = (await api.deleteAudit()).audit; await load()
-  } catch (e) {
-    deleteOutcome.value = 'Deletion did not complete. Targets were reloaded; review audit before retrying.'
-    error.value = String(e)
-    deletePreview.value = null
-    try { audit.value = (await api.deleteAudit()).audit; await load() } catch (reloadError) { error.value += `; reload failed: ${reloadError}` }
-  } finally { deleteBusy.value = false }
-}
+const previewDelete = () => previewLocal(deletable.value.map((row) => row.id))
 async function matchSavedLink() {
   if (!matchingLink.value || !matchFile.value?.tracks?.length) return
   const track = matchFile.value.tracks[0]
@@ -365,8 +372,8 @@ useTabRefresh('library', load)
     <v-btn icon variant="text" :loading="picking" aria-label="Add files" @click="pickFiles">
       <v-icon>mdi-file-plus-outline</v-icon><v-tooltip activator="parent" location="bottom">Add files from disk as tracks (absolute path)</v-tooltip>
     </v-btn>
-    <v-btn icon variant="text" :loading="verifying" aria-label="Verify links" @click="verifyDialog = true">
-      <v-icon>mdi-link-variant</v-icon><v-tooltip activator="parent" location="bottom">Verify links (background task)</v-tooltip>
+    <v-btn icon variant="text" :loading="verifying" aria-label="Verify labels" @click="startVerifyLabels">
+      <v-icon>mdi-check-decagram-outline</v-icon><v-tooltip activator="parent" location="bottom">Verify labels — link health + local/download for selection (background)</v-tooltip>
     </v-btn>
     <v-btn v-if="selectedTrackIds.length || selectedFileRefs.length" icon color="primary" variant="text" :loading="addingFiles" aria-label="Send to Workspace" @click="sendSelectionToWorkspace">
       <v-icon>mdi-send</v-icon><v-tooltip activator="parent" location="bottom">Send {{ selectedTrackIds.length + selectedFileRefs.length }} to Workspace</v-tooltip>
@@ -412,7 +419,9 @@ useTabRefresh('library', load)
   </CurationList>
 
   <v-dialog v-model="matchingLink" max-width="620"><v-card v-if="matchingLink"><v-card-title>Match saved link to local track</v-card-title><v-card-text><div class="text-body-2 mb-3">Choose existing Library file. This preserves exact folder identity.</div><v-list lines="two"><v-list-item v-for="file in localFiles.filter((item) => item.tracks.length)" :key="`${file.folder_identity}-${file.relative_path}`" :active="matchFile === file" @click="matchFile = file"><v-list-item-title>{{ fileLabel(file) }}</v-list-item-title><v-list-item-subtitle>{{ file.tracks.map((track) => `${track.artist || ''} ${track.title || track.filename || ''}`).join(', ') }}</v-list-item-subtitle></v-list-item></v-list></v-card-text><v-card-actions><v-spacer /><v-btn variant="text" @click="matchingLink = null">Cancel</v-btn><v-btn color="primary" :disabled="!matchFile" @click="matchSavedLink">Match exact file</v-btn></v-card-actions></v-card></v-dialog>
-  <TypedConfirmDialog :model-value="!!deletePreview" :title="`Delete ${deletePreview?.targets.length} approved local files?`" :loading="deleteBusy" @update:model-value="(v) => { if (!v) deletePreview = null }" @confirm="confirmDelete">
+  <DownloadRunAlert :run="dlRun" @dismiss="dismissRun" />
+  <v-alert v-if="deleteOutcome" type="info" variant="tonal" closable class="mt-3" @click:close="deleteOutcome = ''">{{ deleteOutcome }}</v-alert>
+  <TypedConfirmDialog :model-value="!!deletePreview" :title="`Delete ${deletePreview?.targets.length} approved local files?`" :loading="deleteBusy" @update:model-value="(v) => { if (!v) deletePreview = null }" @confirm="confirmLocal">
     <p>This action deletes only selected approved Library files. No arbitrary path can be entered.</p>
     <v-list density="compact" class="my-3"><v-list-item v-for="target in deletePreview?.targets || []" :key="target.track_id" :title="target.relative_path" /></v-list>
   </TypedConfirmDialog>
@@ -423,12 +432,14 @@ useTabRefresh('library', load)
   <ActionMenu v-model="fileMenu.open" :target="fileMenu.target" :items="fileMenu.items" @select="(mode) => { onFileMenu(mode, fileMenu.row, fileMenu.source); fileMenu.open = false }" />
   <SearchPickerDialog v-model="picker.open" :mode="picker.mode" :title="picker.title" :initial-query="picker.query" :artist="picker.artist" :song-title="picker.songTitle" @pick="onPick" />
   <ForceSetDialog :state="fset" @update:open="fset.open = $event" @update:value="setForceValue" @apply="applyForceSet" />
-  <InfoEditDialog v-model="info.open" :title="info.title" :data="info.data" :editable="info.editable" @save="saveInfo" />
+  <InfoEditDialog v-model="info.open" :title="info.title" :data="info.data" :editable="info.editable" @save="saveInfo" @error="error = $event" />
+  <LyricsDialog v-model="lyrics.open" :kind="lyrics.kind" :id="lyrics.id" :title="lyrics.title" />
   <ActionMenu v-model="statusMenu.open" :target="statusMenu.target" :items="STATUS_MENU_ITEMS" @select="(mode) => { statusAction(mode, statusMenu.row); statusMenu.open = false }" />
   <ActionMenu v-model="untrackedMenu.open" :target="untrackedMenu.target" :items="untrackedMenuItems()" @select="untrackedAction" />
   <InfoDialog v-model="fileInfo" />
   <VerifyScopeDialog v-model="verifyDialog" :busy="verifying" @pick="startVerify" />
-  <ConfirmDialog :model-value="!!downloadDeleteConfirm" title="Delete downloaded file?" confirm-label="Delete" :max-width="440" @update:model-value="(v) => { if (!v) downloadDeleteConfirm = null }" @confirm="confirmDownloadDelete">
+  <FormatDialog :model-value="dlFmt.open" :busy="dlFmt.busy" title="Download audio" @update:model-value="dlFmt.open = $event" @pick="chooseFormat" />
+  <ConfirmDialog :model-value="!!downloadConfirm" title="Delete downloaded file?" confirm-label="Delete" :max-width="440" @update:model-value="(v) => { if (!v) downloadConfirm = null }" @confirm="confirmDownloadDelete">
     Deletes the file in your download folder. The Library entry and any mp3-folder file stay.
   </ConfirmDialog>
 

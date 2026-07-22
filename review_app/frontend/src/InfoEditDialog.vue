@@ -2,6 +2,7 @@
 // Row metadata viewer + editor. Shows every field the row carries; in edit mode the
 // whitelisted `editable` keys become inputs. Emits `save` with only the edited fields.
 import { ref, computed, watch } from 'vue'
+import { api } from './api'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -9,7 +10,7 @@ const props = defineProps({
   data: { type: Object, default: () => ({}) },
   editable: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['update:modelValue', 'save'])
+const emit = defineEmits(['update:modelValue', 'save', 'error'])
 
 const editing = ref(false)
 const form = ref({})
@@ -21,6 +22,17 @@ watch(() => props.modelValue, (open) => {
   if (open) { editing.value = false; form.value = Object.fromEntries(props.editable.map((k) => [k, props.data[k] ?? ''])) }
 })
 function save() { emit('save', { ...form.value }); editing.value = false }
+
+const romanizing = ref(false)
+async function romanize() {
+  const keys = props.editable.filter((k) => form.value[k])
+  if (!keys.length) return
+  romanizing.value = true
+  try {
+    const { texts } = await api.romanize(keys.map((k) => String(form.value[k])))
+    keys.forEach((k, i) => { form.value[k] = texts[i] })
+  } catch (e) { emit('error', String(e)) } finally { romanizing.value = false }
+}
 </script>
 
 <template>
@@ -31,6 +43,7 @@ function save() { emit('save', { ...form.value }); editing.value = false }
         <v-spacer />
         <v-btn v-if="!editing && editable.length" icon="mdi-pencil" size="small" variant="text" class="flex-shrink-0" aria-label="Edit" @click="editing = true" />
         <template v-else-if="editing">
+          <v-btn size="small" variant="text" prepend-icon="mdi-syllabary-hiragana" :loading="romanizing" @click="romanize">Romanize</v-btn>
           <v-btn size="small" variant="text" @click="editing = false">Cancel</v-btn>
           <v-btn size="small" color="primary" @click="save">Save</v-btn>
         </template>

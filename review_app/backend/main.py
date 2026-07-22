@@ -215,7 +215,8 @@ def _has_local(filename):
 
 class Decision(BaseModel):
     track_id: int
-    decision: bool        # True = approve, False = reject
+    decision: bool                    # True = approve, False = reject
+    checklist: list[str] | None = None  # verified parts: youtube/local/lyrics/metadata
 
 
 class PlaylistReq(BaseModel):
@@ -233,6 +234,16 @@ class WorkspaceIds(BaseModel):
     ids: list[PositiveInt]
 
 
+class WorkspaceDownloadReq(WorkspaceIds):
+    format: str = "opus"
+
+
+class DownloadRunReq(BaseModel):
+    yt_ids: list[str]
+    format: str = "opus"
+    replace: bool = True
+
+
 class WorkspaceTrack(BaseModel):
     track_id: PositiveInt
 
@@ -242,6 +253,15 @@ class DeleteTracksReq(BaseModel):
 
 
 class DeleteConfirmReq(DeleteTracksReq):
+    confirm: str
+    token: str
+
+
+class WorkspaceLocalDelete(BaseModel):
+    ids: list[PositiveInt]
+
+
+class WorkspaceLocalDeleteConfirm(WorkspaceLocalDelete):
     confirm: str
     token: str
 
@@ -394,8 +414,10 @@ def _read_audio_tags(path):
             return {}
         artist = audio.get("artist") or []
         title = audio.get("title") or []
+        album = audio.get("album") or []
         return {"tag_artist": artist[0] if artist else None,
-                "tag_title": title[0] if title else None}
+                "tag_title": title[0] if title else None,
+                "tag_album": album[0] if album else None}
     except Exception:
         return {}
 
@@ -716,14 +738,18 @@ def _workspace_run_view(run_id):
     return result
 
 
-@app.post("/api/workspace/runs/download")
-def api_workspace_download_run(req: WorkspaceIds):
-    try:
-        snapshot = db.workspace_selection(req.ids)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+def _audio_format(fmt):
+    fmt = (fmt or "opus").lower()
+    if fmt not in ("opus", "mp3", "m4a"):
+        raise HTTPException(status_code=400, detail="format must be opus, mp3, or m4a")
+    return fmt
+
+
+def _start_download_run(items, skipped_ids, fmt, replace):
+    """Shared audio-download run: write an ids file, launch the downloader subprocess with
+    the chosen codec, track a workspace_run. replace=True re-downloads even already-downloaded
+    ids and swaps the old file only on success (downloader writes to .part first, then the app
+    removes the stale old-format file post-success — see _remove_stale_after_replace)."""
     try:
         jobs.reserve_pipeline("workspace_download")
     except RuntimeError as e:
@@ -732,14 +758,16 @@ def api_workspace_download_run(req: WorkspaceIds):
     run_id = None
     input_path = None
     launched = False
+    # Snapshot the id's existing download files up front (do NOT delete now — only after success).
+    pre_files = {it["youtube_id"]: set(_download_files_for_id(it["youtube_id"])) for it in items} if replace else {}
     try:
         os.makedirs(RUN_STORAGE, exist_ok=True)
         run_id = db.create_workspace_run(
-            "download", None, "workspace-selection", snapshot["unique_items"]
+            "download", None, "workspace-selection", items
         )
         input_path = os.path.join(RUN_STORAGE, f"run-{run_id}-{uuid.uuid4().hex}.ids")
         with open(input_path, "w", encoding="utf-8", newline="") as stream:
-            for item in snapshot["unique_items"]:
+            for item in items:
                 stream.write(item["youtube_id"] + "\n")
         conn = db.connect()
         try:
@@ -756,6 +784,8 @@ def api_workspace_download_run(req: WorkspaceIds):
                     "done" if outcome["returncode"] == 0 else "failed")
                 error = None if status == "done" else f"downloader exit code {outcome['returncode']}"
                 db.update_workspace_run(run_id, status, error)
+                if replace and status == "done":
+                    _remove_stale_after_replace(pre_files)
             finally:
                 try:
                     os.remove(input_path)
@@ -763,16 +793,19 @@ def api_workspace_download_run(req: WorkspaceIds):
                     pass
 
         db.update_workspace_run(run_id, "running")
+        env = {"YT_INPUT_FILE": input_path, "AUDIO_FORMAT": fmt}
+        if replace:
+            env["YT_FORCE_REDOWNLOAD"] = "1"
         jobs.start(
             "downloader",
-            env_overrides={"YT_INPUT_FILE": input_path},
+            env_overrides=env,
             finalize=finalize,
             reservation_name="workspace_download",
             run_id=run_id,
         )
         launched = True
         result = _workspace_run_view(run_id)
-        result["skipped_duplicate_item_ids"] = list(snapshot["skipped_duplicate_item_ids"])
+        result["skipped_duplicate_item_ids"] = list(skipped_ids)
         return result
     except Exception as e:
         if run_id is not None:
@@ -792,6 +825,36 @@ def api_workspace_download_run(req: WorkspaceIds):
         if isinstance(e, RuntimeError):
             raise HTTPException(status_code=409, detail=str(e))
         raise
+
+
+@app.post("/api/workspace/runs/download")
+def api_workspace_download_run(req: WorkspaceDownloadReq):
+    try:
+        snapshot = db.workspace_selection(req.ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    # Bulk keeps skip-existing behavior (replace=False); it just picks the codec.
+    return _start_download_run(snapshot["unique_items"],
+                               snapshot["skipped_duplicate_item_ids"],
+                               _audio_format(req.format), replace=False)
+
+
+@app.post("/api/download/run")
+def api_download_run(req: DownloadRunReq):
+    """Download one/more YouTube ids straight to the download folder (the YouTube-label
+    button on any screen). replace=True → re-download and swap the file on success."""
+    seen, items = set(), []
+    for raw in req.yt_ids:
+        yt_id = (raw or "").strip()
+        if yt_id and yt_id not in seen:
+            seen.add(yt_id)
+            items.append({"youtube_id": yt_id,
+                          "youtube_url": f"https://www.youtube.com/watch?v={yt_id}"})
+    if not items:
+        raise HTTPException(status_code=400, detail="yt_ids required")
+    return _start_download_run(items, [], _audio_format(req.format), replace=req.replace)
 
 
 @app.get("/api/workspace/runs")
@@ -929,7 +992,8 @@ def api_library_verify(req: LibraryVerify):
 
 # ── background verify tasks + Activity log ──────────────────────────────────
 class VerifyScope(BaseModel):
-    scope: str = "unverified"          # "all" | "unverified"
+    scope: str = "unverified"          # "all" | "unverified" (used when ids is None)
+    ids: list[int] | None = None       # verify exactly these (the "Verify labels" selection)
 
 
 def _resolve_health(yt_id):
@@ -943,9 +1007,22 @@ def _resolve_health(yt_id):
 
 @app.post("/api/tasks/verify/library")
 def api_task_verify_library(req: VerifyScope):
+    # Refresh the catalog up front so the sweep also re-derives local-file freshness, not just
+    # link health — this is the "Verify labels" action. Dead links auto-unreview (set_track_health).
+    _refresh_catalog()
+    if req.ids is not None:               # selection: verify each one's local file too (same core)
+        for track_id in req.ids:
+            try:
+                _verify_entity_local("track", track_id)
+            except HTTPException:
+                pass
     rows, _ = db.get_rows(status="all", limit=1_000_000, offset=0)
     linked = [r for r in rows if r.get("yt_id")]
-    targets = linked if req.scope == "all" else [r for r in linked if not r.get("yt_health")]
+    if req.ids is not None:
+        wanted = set(req.ids)
+        targets = [r for r in linked if r["id"] in wanted]
+    else:
+        targets = linked if req.scope == "all" else [r for r in linked if not r.get("yt_health")]
     yt = {r["id"]: r["yt_id"] for r in targets}
 
     def do_one(track_id):
@@ -958,27 +1035,41 @@ def api_task_verify_library(req: VerifyScope):
         return health in ("dead", "private")
 
     try:
-        return tasks.run("library-verify", "Verify library links", list(yt), do_one)
+        return tasks.run("library-verify", "Verify labels", list(yt), do_one)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
 
 @app.post("/api/tasks/verify/workspace")
 def api_task_verify_workspace(req: VerifyScope):
+    _refresh_catalog()
+    if req.ids is not None:               # selection: verify each one's local file too (same core)
+        for item_id in req.ids:
+            try:
+                _verify_entity_local("workspace", item_id)
+            except HTTPException:
+                pass
     items = [it for it in db.list_workspace() if it.get("youtube_id")]
-    targets = items if req.scope == "all" else [
-        it for it in items if _item_metadata(it).get("health") in (None, "unknown")]
+    if req.ids is not None:
+        wanted = set(req.ids)
+        targets = [it for it in items if it["id"] in wanted]
+    else:
+        targets = items if req.scope == "all" else [
+            it for it in items if _item_metadata(it).get("health") in (None, "unknown")]
     yt = {it["id"]: it["youtube_id"] for it in targets}
+    track_of = {it["id"]: it.get("track_id") for it in targets}
 
     def do_one(item_id):
         meta = _resolve_yt_metadata(yt[item_id])
         db.set_workspace_metadata(item_id, meta)
-        if meta.get("health", "unknown") == "unknown":
+        health = meta.get("health", "unknown")
+        db.unreview_track_if_dead(track_of[item_id], health)   # dead link + approved track -> unreviewed
+        if health == "unknown":
             raise tasks.NetworkDown()
-        return meta.get("health") in ("dead", "private")
+        return health in ("dead", "private")
 
     try:
-        return tasks.run("workspace-verify", "Verify workspace links", list(yt), do_one)
+        return tasks.run("workspace-verify", "Verify labels", list(yt), do_one)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -1194,6 +1285,383 @@ def api_task_find_local_workspace(req: FindScope):
     try:
         return tasks.run("workspace-find-local", "Find local files",
                          list(by_id), do_one, delay=(0, 0), noun="found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+# ── Lyrics + metadata finding (LRCLIB/community providers + MusicBrainz) ──────
+# Lyrics reuse the repo-root lyrics_fetch providers; metadata is a small MusicBrainz
+# recording lookup. Both fetch by (artist, title) — the SAME terms as find-youtube —
+# store onto the item, and run as paced background sweeps (tasks.py) just like the
+# link/file finders. See usb-ldac (web/api/{lyrics,metadata}.py) for the reference.
+_MB_UA = "yt-playlist-generator/1.0 (personal music library)"
+
+
+def _entity_path(item):
+    """Absolute path of the local/track file a Workspace item points to, or None."""
+    if item.get("relative_path"):
+        p = os.path.join(item.get("folder_identity") or "", item["relative_path"])
+        return p if os.path.isfile(p) else None
+    rec = _record_for_track(item["track_id"]) if item.get("track_id") else None
+    return _safe_delete_record(rec) if rec else None
+
+
+def _read_sidecar(path):
+    """Existing .lrc (synced) or .txt (plain) lyrics sidecar next to `path`, or None."""
+    if not path:
+        return None
+    base = os.path.splitext(path)[0]
+    for ext in (".lrc", ".txt"):
+        side = base + ext
+        if os.path.isfile(side):
+            try:
+                with open(side, encoding="utf-8", errors="replace") as f:
+                    return f.read()
+            except OSError:
+                return None
+    return None
+
+
+def _lyrics_payload(text):
+    import lyrics_fetch
+    text = text or ""
+    return {"found": bool(text), "synced": lyrics_fetch.is_synced(text), "lyrics": text}
+
+
+def _fetch_lyrics(artist, title):
+    """Online lyrics for (artist, title) via the repo-root providers, '' on any miss.
+    ponytail: providers swallow their own errors, so a network outage looks like 'no
+    lyrics' rather than tripping the bulk cutoff — acceptable, they never fabricate."""
+    import lyrics_fetch
+    try:
+        return lyrics_fetch.fetch_lyrics(artist, title) or ""
+    except Exception:
+        return ""
+
+
+def _write_lyrics_sidecar(path, text):
+    """Write a .lrc (synced) or .txt (plain) sidecar next to `path` and drop the stale
+    alternate, so other tools (players, usb-ldac) see the fresh lyrics."""
+    import lyrics_fetch
+    out = lyrics_fetch.write_sidecar(path, text)
+    alt = os.path.splitext(path)[0] + (".txt" if out.endswith(".lrc") else ".lrc")
+    if os.path.isfile(alt):
+        try:
+            os.remove(alt)
+        except OSError:
+            pass
+    return out
+
+
+# ── entity dispatch (track | workspace): one code path, thin route wrappers ──────
+# Lyrics + metadata + file-tags work the same for a Library track and a Workspace item
+# (mirrors /embed). Per-kind differences live in these four tiny resolvers only.
+_ENTITY_KINDS = ("track", "workspace")
+
+
+def _entity_row(kind, entity_id):
+    if kind not in _ENTITY_KINDS:
+        raise HTTPException(status_code=404, detail="unknown entity kind")
+    if kind == "workspace":
+        return _ws_item(entity_id)
+    conn = db.connect()
+    try:
+        row = conn.execute("SELECT * FROM tracks WHERE id=?", (entity_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="track not found")
+    return db._expand_extra(dict(row))
+
+
+def _entity_terms(kind, row):
+    if kind == "workspace":
+        return _item_terms(row)
+    return (row.get("artist") or "", row.get("title") or "")
+
+
+def _entity_file_path(kind, row):
+    if kind == "workspace":
+        return _entity_path(row)
+    rec = _record_for_track(row["id"])
+    return _safe_delete_record(rec) if rec else None
+
+
+def _entity_stored_lyrics(kind, row):
+    # Workspace keeps a lyrics blob in metadata_json; a track relies on its sidecar.
+    return _item_metadata(row).get("lyrics") if kind == "workspace" else None
+
+
+def _entity_store_lyrics(kind, entity_id, path, text):
+    if kind == "workspace":
+        db.set_workspace_metadata(entity_id, {"lyrics": text})
+    if path:
+        try:
+            _write_lyrics_sidecar(path, text)
+        except OSError:
+            pass
+
+
+def _entity_lyrics_get(kind, entity_id, force=False):
+    """Lyrics for an entity: stored blob -> sidecar -> online. Stores what it finds.
+    `force` re-fetches online even when something is already stored."""
+    row = _entity_row(kind, entity_id)
+    path = _entity_file_path(kind, row)
+    if not force:
+        stored = _entity_stored_lyrics(kind, row)
+        if stored:
+            return _lyrics_payload(stored)
+        side = _read_sidecar(path)
+        if side:
+            _entity_store_lyrics(kind, entity_id, None, side)   # cache blob; sidecar already on disk
+            return _lyrics_payload(side)
+    artist, title = _entity_terms(kind, row)
+    text = _fetch_lyrics(artist, title)
+    if text:
+        _entity_store_lyrics(kind, entity_id, path, text)
+    return _lyrics_payload(text)
+
+
+def _entity_lyrics_save(kind, entity_id, text):
+    """Persist user-edited lyrics: metadata blob (workspace) + sidecar (either kind)."""
+    row = _entity_row(kind, entity_id)
+    path = _entity_file_path(kind, row)
+    text = (text or "").strip()
+    if kind == "workspace":
+        db.set_workspace_metadata(entity_id, {"lyrics": text})
+    elif not path:
+        raise HTTPException(status_code=400, detail="this track has no local file to save lyrics to")
+    if path and text:
+        try:
+            _write_lyrics_sidecar(path, text)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"could not write sidecar: {e}")
+    return _lyrics_payload(text)
+
+
+def _entity_apply_metadata(kind, entity_id):
+    """Auto-apply the best confident MusicBrainz artist/title. Returns the match dict
+    when applied (above MB_MIN_SCORE), else None. Reversible via Info."""
+    row = _entity_row(kind, entity_id)
+    artist, title = _entity_terms(kind, row)
+    best = _mb_best(artist, title)
+    if not best or best["score"] < settings.mb_min_score():
+        return None
+    if kind == "workspace":
+        db.set_workspace_metadata(entity_id, {"title": best["title"], "channel": best["artist"],
+                                              "mb_score": best["score"]})
+    else:
+        db.update_track_fields(entity_id, {"artist": best["artist"], "title": best["title"]})
+    return best
+
+
+def _entity_file_tags(kind, entity_id):
+    """Artist/title/album read from the entity's actual audio file (mutagen), plus
+    whether a readable file was found. Answers 'what's in the file?' for the UI."""
+    row = _entity_row(kind, entity_id)
+    path = _entity_file_path(kind, row)
+    return {"has_file": bool(path), **(_read_audio_tags(path) if path else {})}
+
+
+def _mb_best(artist, title):
+    """Best MusicBrainz recording match for (artist, title): {artist,title,score} or
+    None below/absent. Raises tasks.NetworkDown on a fetch failure so a bulk sweep can
+    trip its network cutoff instead of silently overwriting nothing."""
+    import urllib.parse
+    import urllib.request
+    terms = []
+    for field, value in (("artist", artist), ("recording", title)):
+        value = (value or "").strip().replace('"', "")
+        if value:
+            terms.append(f'{field}:"{value}"')
+    if not terms:
+        return None
+    params = urllib.parse.urlencode({"query": " AND ".join(terms), "fmt": "json",
+                                     "limit": settings.mb_search_limit()})
+    req = urllib.request.Request("https://musicbrainz.org/ws/2/recording/?" + params,
+                                 headers={"User-Agent": _MB_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read()).get("recordings", [])
+    except Exception as e:
+        raise tasks.NetworkDown() from e
+    if not rows:
+        return None
+    best = max(rows, key=lambda r: r.get("score") or 0)
+    artist_name = "".join(f"{p.get('name', '')}{p.get('joinphrase', '')}"
+                          for p in best.get("artist-credit") or [])
+    return {"artist": artist_name, "title": best.get("title") or "", "score": best.get("score") or 0}
+
+
+def _ws_item(item_id):
+    item = next((it for it in db.list_workspace() if it["id"] == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="workspace item not found")
+    return item
+
+
+class LyricsSave(BaseModel):
+    lyrics: str = ""
+
+
+# Generic {kind} routes (kind = 'track' | 'workspace'); one implementation, both entities.
+@app.get("/api/{kind}/{entity_id}/lyrics")
+def api_entity_lyrics(kind: str, entity_id: int, refresh: bool = False):
+    return _entity_lyrics_get(kind, entity_id, force=refresh)
+
+
+@app.post("/api/{kind}/{entity_id}/lyrics")
+def api_entity_find_lyrics(kind: str, entity_id: int):
+    """Find + store lyrics for one entity ('Find lyrics')."""
+    return _entity_lyrics_get(kind, entity_id, force=True)
+
+
+@app.post("/api/{kind}/{entity_id}/lyrics/save")
+def api_entity_save_lyrics(kind: str, entity_id: int, req: LyricsSave):
+    """Persist user-edited lyrics (the lyric viewer's Edit → Save)."""
+    return _entity_lyrics_save(kind, entity_id, req.lyrics)
+
+
+@app.post("/api/{kind}/{entity_id}/find-metadata")
+def api_entity_find_metadata(kind: str, entity_id: int):
+    """Auto-apply the best confident MusicBrainz match for one entity ('Find metadata')."""
+    try:
+        best = _entity_apply_metadata(kind, entity_id)
+    except tasks.NetworkDown:
+        raise HTTPException(status_code=502, detail="MusicBrainz unreachable")
+    if best is None:
+        raise HTTPException(status_code=404, detail="no confident MusicBrainz match")
+    return _decorate_workspace_items([_ws_item(entity_id)])[0] if kind == "workspace" else api_track(entity_id)
+
+
+@app.get("/api/{kind}/{entity_id}/file-tags")
+def api_entity_file_tags(kind: str, entity_id: int):
+    return _entity_file_tags(kind, entity_id)
+
+
+# ── Per-row label verification (YouTube / Local file / Downloaded labels) ────
+def _entity_yt_id(kind, row):
+    return row.get("youtube_id") if kind == "workspace" else row.get("yt_id")
+
+
+def _entity_local_ref(kind, row):
+    """(folder_identity, relative_path) of the entity's local file from the DB (independent of
+    whether the file still exists), or None. Direct Workspace ref wins; else the track's link."""
+    if kind == "workspace" and row.get("relative_path") and not _is_download_ref(row):
+        return row["folder_identity"], row["relative_path"]
+    track_id = row.get("track_id") if kind == "workspace" else row.get("id")
+    if track_id:
+        links = db.local_deletion_links([track_id])
+        if links:
+            return links[0]["folder_identity"], links[0]["relative_path"]
+    return None
+
+
+@app.post("/api/{kind}/{entity_id}/verify-link")
+def api_entity_verify_link(kind: str, entity_id: int):
+    """Re-check one YouTube link's health (yt-dlp). Persists it; a dead/private link on an
+    approved track sends the track back to unreviewed (db enforces the rule)."""
+    row = _entity_row(kind, entity_id)
+    yt_id = _entity_yt_id(kind, row)
+    if not yt_id:
+        raise HTTPException(status_code=400, detail="no YouTube link to verify")
+    meta = _resolve_yt_metadata(yt_id)
+    health = meta.get("health", "unknown")
+    if kind == "workspace":
+        db.set_workspace_metadata(entity_id, meta)
+        db.unreview_track_if_dead(row.get("track_id"), health)
+    else:
+        db.set_track_health(entity_id, health)
+    return {"health": health}
+
+
+def _verify_entity_local(kind, entity_id):
+    """Core of verify-local (no catalog refresh — callers refresh once): does the entity's local
+    file still exist on disk? If not, flag its track link unavailable AND clear a Workspace item's
+    own dangling direct ref (mark_links_unavailable can't, it isn't a track link), so the 'local'
+    label drops for both. Returns present. Shared by the per-row route and the bulk sweep."""
+    row = _entity_row(kind, entity_id)
+    ref = _entity_local_ref(kind, row)
+    if not ref:
+        return False
+    folder_identity, relative_path = ref
+    present = bool(relative_path and os.path.isfile(os.path.join(folder_identity or "", relative_path)))
+    if not present:
+        db.mark_links_unavailable(folder_identity, relative_path)
+        if kind == "workspace" and row.get("relative_path") and not _is_download_ref(row):
+            db.clear_workspace_file_ref_or_remove(entity_id)
+    return present
+
+
+@app.post("/api/{kind}/{entity_id}/verify-local")
+def api_entity_verify_local(kind: str, entity_id: int):
+    """Re-check the entity's local mp3-folder file still exists on disk; clear the 'local' label
+    if it's gone. Refreshes the catalog first."""
+    _refresh_catalog()
+    return {"present": _verify_entity_local(kind, entity_id)}
+
+
+@app.post("/api/{kind}/{entity_id}/verify-download")
+def api_entity_verify_download(kind: str, entity_id: int):
+    """Re-check the download-folder file for this entity's id still exists (the 'downloaded'
+    label is derived live, so the caller just reloads to refresh it)."""
+    row = _entity_row(kind, entity_id)
+    yt_id = _entity_yt_id(kind, row)
+    return {"present": bool(yt_id and _download_file_path(yt_id))}
+
+
+class RomanizeReq(BaseModel):
+    texts: list[str]
+
+
+@app.post("/api/romanize")
+def api_romanize(req: RomanizeReq):
+    """Romanize each string (CJK → Hepburn, ASCII untouched). Lyrics send one blob
+    (LRC-safe); metadata edit sends its field values. Filenames use
+    /api/romanize/filename (it renames the file, not just the text)."""
+    import romanize
+    return {"texts": [romanize.romanize_text(t) for t in req.texts]}
+
+
+@app.post("/api/tasks/find-lyrics/workspace")
+def api_task_find_lyrics_workspace(req: FindScope):
+    """Background: fetch + store lyrics for selected Workspace items missing them
+    (paced, cancellable). Items that already have stored lyrics are skipped."""
+    items = db.list_workspace()
+    targets = [it for it in items if _has_terms(it) and not _item_metadata(it).get("lyrics")]
+    if req.ids is not None:
+        wanted = set(req.ids)
+        targets = [it for it in targets if it["id"] in wanted]
+    ids = [it["id"] for it in targets]
+
+    def do_one(item_id):   # ponytail: re-lists workspace per item (O(n²)); fine, sweep is paced
+        return _entity_lyrics_get("workspace", item_id, force=False)["found"]
+
+    try:
+        return tasks.run("workspace-find-lyrics", "Find lyrics", ids, do_one,
+                         delay=settings.task_delay(), noun="found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/api/tasks/find-metadata/workspace")
+def api_task_find_metadata_workspace(req: FindScope):
+    """Background: for selected Workspace items with something to search by, auto-apply
+    the best confident MusicBrainz artist/title (paced, cancellable). Overwrites
+    title/channel above the score floor — reversible via Info edit."""
+    items = db.list_workspace()
+    targets = [it for it in items if _has_terms(it)]
+    if req.ids is not None:
+        wanted = set(req.ids)
+        targets = [it for it in targets if it["id"] in wanted]
+    ids = [it["id"] for it in targets]
+
+    def do_one(item_id):
+        return _entity_apply_metadata("workspace", item_id) is not None
+
+    try:
+        return tasks.run("workspace-find-metadata", "Find metadata", ids, do_one,
+                         delay=settings.task_delay(), noun="updated")
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -1629,6 +2097,149 @@ def api_library_delete_audit():
     return {"audit": db.list_deletion_audit()}
 
 
+# ── Workspace bulk delete-local ─────────────────────────────────────────────
+# Deletes the mp3-folder local file behind selected Workspace items. Unlike the
+# Library flow it is NOT gated on approval (the user curates in the Workspace), but
+# every other safeguard stays: only files contained in a configured mp3 folder are
+# touched (download-folder + out-of-folder refs are skipped), behind a preview →
+# short-lived token → typed DELETE → stat-revalidation → audit.
+def _item_delete_ref(item):
+    """(folder_identity, relative_path) of a Workspace item's deletable mp3-folder local
+    file, or None. Prefers the item's own direct file ref (when it is an mp3-folder file,
+    not a download); else the linked track's available local file."""
+    if item.get("relative_path") and not _is_download_ref(item):
+        record = _record_for_ref(item["folder_identity"], item["relative_path"])
+        return (record["folder_identity"], record["relative_path"]) if record else None
+    if item.get("track_id"):
+        for row in db.local_deletion_links([item["track_id"]]):
+            record = _record_for_ref(row["folder_identity"], row["relative_path"])
+            if record:
+                return record["folder_identity"], record["relative_path"]
+    return None
+
+
+def _workspace_item_refs(ids):
+    """Resolve item ids -> deletable refs. Also returns `direct_ids`: items that delete their
+    OWN direct file ref (so their now-dangling ref must be cleared after deletion — a track-
+    linked item instead just loses its link's availability, handled in the delete itself)."""
+    by_id = {item["id"]: item for item in db.list_workspace()}
+    refs, skipped, direct_ids = [], [], []
+    for item_id in ids:
+        item = by_id.get(item_id)
+        if item is None:
+            skipped.append({"id": item_id, "reason": "not found"})
+            continue
+        ref = _item_delete_ref(item)
+        if ref:
+            refs.append(ref)
+            if item.get("relative_path") and not _is_download_ref(item):
+                direct_ids.append(item_id)
+        else:
+            skipped.append({"id": item_id, "reason": "no deletable mp3-folder file"})
+    return refs, skipped, direct_ids
+
+
+def _ref_delete_targets(refs):
+    """Safe delete targets from (folder_identity, relative_path) pairs — contained mp3-folder
+    files only, no approval gate. Deduped (two items can share one file)."""
+    targets, seen = [], set()
+    for folder_identity, relative_path in refs:
+        key = (os.path.normcase(folder_identity or ""), relative_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        record = _record_for_ref(folder_identity, relative_path)
+        path = _safe_delete_record(record) if record is not None else False
+        if not path:
+            raise HTTPException(status_code=409, detail=f"local file missing or unsafe: {relative_path}")
+        info = os.stat(path)
+        targets.append({"track_id": None, "folder_identity": record["folder_identity"],
+                        "relative_path": record["relative_path"], "file_size": info.st_size,
+                        "modified_at": str(info.st_mtime_ns), "identity": (info.st_dev, info.st_ino),
+                        "record": record, "delete_path": path})
+    return targets
+
+
+@app.post("/api/workspace/local-delete/preview")
+def api_workspace_local_delete_preview(req: WorkspaceLocalDelete):
+    refs, skipped, _ = _workspace_item_refs(req.ids)
+    targets = _ref_delete_targets(refs)
+    state = _target_state(targets)
+    token = _new_token("workspace-local-delete",
+                       {"ids": list(req.ids), "state": state,
+                        "refs": [[t["folder_identity"], t["relative_path"]] for t in state]})
+    return {"token": token, "expires_in": settings.delete_token_ttl(),
+            "targets": [{k: item[k] for k in ("folder_identity", "relative_path", "file_size", "modified_at")}
+                        for item in state],
+            "skipped": skipped}
+
+
+@app.post("/api/workspace/local-delete")
+def api_workspace_local_delete(req: WorkspaceLocalDeleteConfirm):
+    if req.confirm != "DELETE":
+        raise HTTPException(status_code=400, detail="type DELETE to confirm")
+    data = _take_token(req.token, "workspace-local-delete")
+    if list(req.ids) != data["ids"]:
+        raise HTTPException(status_code=409, detail="selection does not match preview")
+    # Which selected items delete their OWN file ref — compute now, while the files still exist.
+    _, _, direct_ids = _workspace_item_refs(req.ids)
+    try:
+        jobs.reserve_pipeline("workspace_local_delete")
+        with jobs.curation_write_guard():
+            result = _perform_ref_delete(data)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    finally:
+        jobs.release_pipeline("workspace_local_delete")
+    # Delete succeeded: drop the now-dangling direct file refs (or remove file-only items).
+    for item_id in direct_ids:
+        db.clear_workspace_file_ref_or_remove(item_id)
+    return result
+
+
+def _perform_ref_delete(data):
+    refs = [tuple(ref) for ref in data["refs"]]
+    try:
+        targets = _ref_delete_targets(refs)
+    except HTTPException as exc:
+        db.finish_local_deletions([{**item, "outcome": "rejected", "detail": exc.detail}
+                                   for item in data["state"]])
+        raise
+    if _target_state(targets) != data["state"]:
+        db.finish_local_deletions([{**item, "outcome": "rejected",
+                                    "detail": "local targets changed since preview"}
+                                   for item in data["state"]])
+        raise HTTPException(status_code=409, detail="local targets changed since preview")
+    deleted = []
+    try:
+        for target in targets:
+            current = _safe_delete_record(target["record"])
+            info = os.stat(current) if current else None
+            if (not current or _is_reparse_point(current) or info.st_size != target["file_size"] or
+                    str(info.st_mtime_ns) != target["modified_at"] or
+                    (info.st_dev, info.st_ino) != target["identity"]):
+                raise OSError("local file changed during confirmation")
+            os.remove(current)
+            deleted.append(target)
+    except OSError as exc:
+        for target in deleted:                     # a deleted file invalidates any track link to it
+            db.mark_links_unavailable(target["folder_identity"], target["relative_path"])
+        db.finish_local_deletions(
+            [{**target, "outcome": "deleted"} for target in deleted] +
+            [{**target, "outcome": "rejected", "detail": str(exc)}
+             for target in targets if target not in deleted])
+        try:
+            _install_catalog(_build_file_catalog(settings.configured_mp3_folders()))
+        finally:
+            raise HTTPException(status_code=409, detail="delete changed during confirmation")
+    for target in targets:                          # track links to a deleted file -> unavailable
+        db.mark_links_unavailable(target["folder_identity"], target["relative_path"])
+    db.finish_local_deletions([{**target, "outcome": "deleted"} for target in targets])
+    _install_catalog(_build_file_catalog(settings.configured_mp3_folders()))
+    return {"deleted": [{"folder_identity": target["folder_identity"], "relative_path": target["relative_path"]}
+                        for target in targets]}
+
+
 @app.get("/api/local-files")
 def api_local_files():
     files = _local_files()
@@ -1711,6 +2322,46 @@ def _download_file_path(yt_id):
     return None
 
 
+def _download_files_for_id(yt_id):
+    """Every download-folder file carrying this id (safe/contained). A format change
+    leaves the old + new file side by side, so replace needs the full set, not just one."""
+    out = []
+    try:
+        root = _safe_download_root()
+    except HTTPException:
+        return out
+    if not root:
+        return out
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return out
+    for name in names:
+        if _download_id(name) != yt_id:
+            continue
+        path = os.path.normpath(os.path.join(root, name))
+        try:
+            if os.path.commonpath((root, path)) == root and not _is_reparse_point(path) and os.path.isfile(path):
+                out.append(path)
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def _remove_stale_after_replace(pre_files):
+    """After a successful replace-download, drop each id's pre-run files ONLY if a genuinely
+    new file landed (e.g. codec changed opus->mp3). Same-name overwrite or a failed id keeps
+    its old file — so a failed download never loses the previous copy."""
+    for yt_id, old in pre_files.items():
+        if set(_download_files_for_id(yt_id)) - old:
+            for path in old:
+                if os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+
 class RevealRef(BaseModel):
     track_id: int | None = None
     folder_identity: str | None = None
@@ -1747,6 +2398,85 @@ def api_reveal(req: RevealRef):
     except (OSError, subprocess.SubprocessError):
         pass
     return {"ok": True}
+
+
+def _local_file_abs_path(folder_identity, relative_path):
+    """Absolute path of a linked local file, validated. Covers catalog identities
+    (normcased) and OS-picker identities (raw case, from _ref_for_path): try the shared
+    resolver first, then fall back to a direct join contained in a configured folder."""
+    ref = _untracked_ref(folder_identity, relative_path)
+    if ref:
+        return ref["path"]
+    p = os.path.join(folder_identity or "", relative_path or "")
+    if not (relative_path and os.path.isfile(p)) or _is_reparse_point(p):
+        return None
+    rp = os.path.normcase(os.path.realpath(p))
+    for folder in settings.configured_mp3_folders():
+        root = os.path.normcase(os.path.realpath(folder))
+        try:
+            if os.path.commonpath((root, rp)) == root:
+                return p
+        except ValueError:
+            continue
+    return None
+
+
+def _romanized_basename(name):
+    """Romanized filename (stem converted, extension kept), or None when it is already
+    ASCII / unchanged. Strips characters illegal in a Windows filename."""
+    import romanize
+    stem, ext = os.path.splitext(name)
+    new = re.sub(r'[\\/:*?"<>|]', "_", romanize.romanize_text(stem)).strip()
+    return (new + ext) if new and new != stem else None
+
+
+def _rename_sidecars(old_path, new_path):
+    """Rename any .lrc/.txt lyric sidecar alongside a renamed audio file so it stays paired."""
+    old_stem, new_stem = os.path.splitext(old_path)[0], os.path.splitext(new_path)[0]
+    for ext in (".lrc", ".txt"):
+        src = old_stem + ext
+        if os.path.isfile(src):
+            try:
+                os.replace(src, new_stem + ext)
+            except OSError:
+                pass
+
+
+@app.post("/api/romanize/filename")
+def api_romanize_filename(req: RevealRef):
+    """Rename the resolved file in place so its name is romanized (CJK → Latin), then
+    repoint the DB refs (track link, Workspace ref, tracks.filename) + lyric sidecars and
+    rebuild the catalog. Download files are renamed only — they're located by [id], which
+    is ASCII and survives. Same locator shape as /api/reveal."""
+    is_download = req.download_yt_id is not None
+    folder_identity = relative_path = None
+    if is_download:
+        path = _download_file_path(req.download_yt_id)
+    else:
+        if req.track_id is not None:
+            links = db.local_deletion_links([req.track_id])
+            link = links[0] if links else None
+            if link:
+                folder_identity, relative_path = link["folder_identity"], link["relative_path"]
+        elif req.folder_identity and req.relative_path:
+            folder_identity, relative_path = req.folder_identity, req.relative_path
+        path = _local_file_abs_path(folder_identity, relative_path) if folder_identity else None
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="file missing or unsafe")
+    newbase = _romanized_basename(os.path.basename(path))
+    if not newbase:
+        return {"renamed": False, "name": os.path.basename(path)}
+    newpath = os.path.join(os.path.dirname(path), newbase)
+    if os.path.exists(newpath):
+        raise HTTPException(status_code=409, detail="a file with the romanized name already exists")
+    os.rename(path, newpath)
+    _rename_sidecars(path, newpath)
+    if not is_download and folder_identity and relative_path:
+        new_rel = (relative_path.rsplit("/", 1)[0] + "/" + newbase) if "/" in relative_path else newbase
+        db.rename_file_link(folder_identity, relative_path, new_rel,
+                            os.path.basename(relative_path), newbase)
+        _install_catalog(_build_file_catalog(settings.configured_mp3_folders()))
+    return {"renamed": True, "name": newbase}
 
 
 @app.get("/api/download-audio")
@@ -2036,18 +2766,28 @@ def api_track(track_id: int):
     return r
 
 
+@app.get("/api/track/{track_id}/decision")
+def api_track_decision(track_id: int):
+    """Latest approve/reject for a track (with its verified-parts checklist), or {}."""
+    return db.latest_decision(track_id) or {}
+
+
 @app.post("/api/decision")
 def api_decision(d: Decision):
     global _decision_count
+    if d.decision and "youtube" not in (d.checklist or []):
+        raise HTTPException(status_code=400, detail="approve requires the YouTube link to be checked")
     try:
         with jobs.curation_write_guard():
-            result = db.record_decision(d.track_id, d.decision)
+            result = db.record_decision(d.track_id, d.decision, d.checklist)
             _decision_count += 1
             if AUTO_EXPORT_EVERY and _decision_count % AUTO_EXPORT_EVERY == 0:
                 db.export_csv_only()       # atomic; marks flow to the git-tracked CSV
                 result["auto_exported"] = True
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return result
