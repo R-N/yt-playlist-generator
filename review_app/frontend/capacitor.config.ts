@@ -10,7 +10,10 @@ const config: CapacitorConfig = {
     },
   },
   // Development/LAN only. Cleartext sends traffic without transport encryption.
+  // androidScheme:'http' makes the WebView origin http so <audio>/<img> can load
+  // plaintext LAN URLs (CapacitorHttp only covers fetch/XHR, not media subresources).
   server: {
+    androidScheme: 'http',
     cleartext: true,
   },
 }

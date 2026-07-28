@@ -28,6 +28,12 @@ networks: HTTP traffic is unencrypted, and this backend has no authentication.
 Do not expose it to the internet or an untrusted network. Prefer HTTPS beyond
 trusted LAN.
 
+`capacitor.config.ts` also sets `server.androidScheme: 'http'` so the WebView
+origin is `http`. `CapacitorHttp` routes `fetch`/XHR through the native stack,
+but `<audio>`/`<img>` are subresource loads it does not intercept — an `https`
+origin would block those plaintext LAN media URLs as mixed content, so audio
+playback needs the `http` scheme.
+
 Launch backend on server machine:
 
 ```text
