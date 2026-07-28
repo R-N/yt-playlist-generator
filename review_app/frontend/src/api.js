@@ -1,11 +1,20 @@
-// Thin fetch wrapper. All URLs relative -> Vite proxies /api to FastAPI.
+import { getNativeServerUrl, isNativeRuntime } from './native'
+
+// Keep browser requests relative; native requests target user-configured FastAPI.
+function requestUrl(url) {
+  if (!isNativeRuntime()) return url
+  const base = getNativeServerUrl()
+  if (!base) throw new Error('Connect to FastAPI server before making requests.')
+  return `${base}${url}`
+}
+
 async function jget(url) {
-  const r = await fetch(url)
+  const r = await fetch(requestUrl(url))
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
   return r.json()
 }
 async function jsend(method, url, body) {
-  const r = await fetch(url, {
+  const r = await fetch(requestUrl(url), {
     method,
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
@@ -27,8 +36,8 @@ export const api = {
   decide: (track_id, decision, checklist) => jpost('/api/decision', { track_id, decision, checklist }),
   trackDecision: (id) => jget(`/api/track/${id}/decision`),
   export: () => jpost('/api/export'),
-  audioUrl: (id) => `/api/audio/${id}`,
-  ytAudioUrl: (ytId) => `/api/yt_audio/${ytId}`,
+  audioUrl: (id) => requestUrl(`/api/audio/${id}`),
+  ytAudioUrl: (ytId) => requestUrl(`/api/yt_audio/${ytId}`),
 
   // settings (.env secrets)
   getSettings: () => jget('/api/settings'),
@@ -56,7 +65,7 @@ export const api = {
   // saved links. Same endpoint for per-row and bulk so they can't drift.
   workspaceSaveToLibrary: (ids) => jpost('/api/workspace/save-to-library', { ids }),
   workspaceDownload: async (ids, format) => {
-    const r = await fetch(`/api/workspace/download/${format}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })
+    const r = await fetch(requestUrl(`/api/workspace/download/${format}`), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
     return { blob: await r.blob(), skippedDuplicates: Number(r.headers.get('X-Workspace-Skipped-Duplicate-Count') || 0) }
   },
@@ -66,8 +75,8 @@ export const api = {
   localFileMatch: (folder_identity, relative_path) => jpost('/api/local-files/match', { folder_identity, relative_path }),
   addFilesToLibrary: (files) => jpost('/api/library/add-files', { files }),
   workspaceAddFiles: (files) => jpost('/api/workspace/add-files', { files }),
-  localAudioUrl: (folder_identity, relative_path) => `/api/local-audio?folder_identity=${encodeURIComponent(folder_identity)}&relative_path=${encodeURIComponent(relative_path)}`,
-  downloadAudioUrl: (yt_id) => `/api/download-audio?yt_id=${encodeURIComponent(yt_id)}`,
+  localAudioUrl: (folder_identity, relative_path) => requestUrl(`/api/local-audio?folder_identity=${encodeURIComponent(folder_identity)}&relative_path=${encodeURIComponent(relative_path)}`),
+  downloadAudioUrl: (yt_id) => requestUrl(`/api/download-audio?yt_id=${encodeURIComponent(yt_id)}`),
   reveal: (body) => jpost('/api/reveal', body),
   downloadDelete: (yt_ids) => jpost('/api/download/delete', { yt_ids }),
   untracked: () => jget('/api/untracked'),

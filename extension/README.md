@@ -25,7 +25,8 @@ halts after current item.
 4. Set delay, click **Like all**, confirm. Stop when needed.
 
 Workspace imports and persists current YouTube work; extension queue remains
-legacy compatibility surface only.
+legacy compatibility surface only. The Android Capacitor wrapper is the
+project's mobile client; this extension is not a mobile app.
 
 ## Cautions
 

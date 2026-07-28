@@ -110,7 +110,7 @@ function copy(value) { navigator.clipboard?.writeText(value) }
   <div class="text-h4 mb-4">Import</div>
 
   <v-card>
-    <v-tabs v-model="flow" color="primary" grow>
+    <v-tabs v-model="flow" color="primary" grow class="responsive-tabs">
       <v-tab value="paste" prepend-icon="mdi-link-variant">Paste YouTube</v-tab>
       <v-tab value="discord" prepend-icon="mdi-forum-outline">Discord</v-tab>
       <v-tab value="files" prepend-icon="mdi-file-question-outline">Untracked files</v-tab>
@@ -119,7 +119,7 @@ function copy(value) { navigator.clipboard?.writeText(value) }
     <v-window v-model="flow" @update:model-value="reset">
       <v-window-item value="paste" class="pa-5">
         <v-textarea v-model="text" label="YouTube URLs or 11-character IDs" rows="7" auto-grow variant="outlined" hide-details placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ&#10;dQw4w9WgXcQ" />
-        <div class="d-flex align-center flex-wrap ga-2 mt-3">
+        <div class="d-flex align-center flex-wrap ga-2 mt-3 mobile-stack-actions">
           <v-chip size="small" color="success" variant="tonal">{{ validIds.length }} valid</v-chip>
           <v-chip size="small" :color="duplicates.length ? 'warning' : undefined" variant="tonal">{{ duplicates.length }} duplicate</v-chip>
           <v-chip size="small" :color="invalid.length ? 'error' : undefined" variant="tonal">{{ invalid.length }} invalid</v-chip>
@@ -138,7 +138,7 @@ function copy(value) { navigator.clipboard?.writeText(value) }
           <v-col cols="12" md="6"><v-text-field v-model="author" label="Author filter (optional)" hint="Blank includes everyone" persistent-hint /></v-col>
         </v-row>
         <v-switch v-model="writeFiles" color="primary" label="Also write pipeline files (ids.txt, urls.txt, playlists.txt)" hide-details />
-        <div class="d-flex justify-end mt-4"><v-btn color="primary" variant="tonal" :loading="loading" prepend-icon="mdi-cloud-download" @click="harvest">Fetch and extract</v-btn></div>
+        <div class="d-flex justify-end mt-4 mobile-stack-actions"><v-btn color="primary" variant="tonal" :loading="loading" prepend-icon="mdi-cloud-download" @click="harvest">Fetch and extract</v-btn></div>
         <v-alert v-if="result" type="success" variant="tonal" class="mt-4">Scanned {{ result.messages }} messages · found <strong>{{ result.count }}</strong> unique video IDs.</v-alert>
         <v-card v-if="result?.ids?.length" variant="tonal" class="mt-4 pa-4">
           <div class="d-flex align-center mb-2"><div class="text-subtitle-2">Extracted IDs ({{ result.ids.length }})</div><v-spacer /><v-btn size="small" variant="text" prepend-icon="mdi-content-copy" @click="copy(result.ids.join('\n'))">Copy</v-btn></div>

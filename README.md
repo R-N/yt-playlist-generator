@@ -26,6 +26,16 @@ unavailable". `run.py` defaults `--host` to `localhost` for this reason.
 Primary navigation: **Import, Workspace, Library, Review, Activity, Settings**.
 The former Local Files and Untracked screens are folded into Library.
 
+The UI is mobile responsive. Primary navigation becomes a mobile drawer, while
+shared lists, toolbars, and tabs adapt to narrow screens. Android is a
+Capacitor 8 wrapper and mobile client. Native launch gates on a persisted
+FastAPI LAN base URL entered as an `http://` or `https://` host and port (not
+`localhost`); browser requests remain relative same-origin. For device use,
+launch backend with `python run.py --host 0.0.0.0` and keep phone/server on same
+Wi-Fi. Cleartext HTTP and no backend authentication mean trusted LAN only;
+prefer HTTPS beyond trusted LAN. Android setup is documented in
+[`review_app/frontend/ANDROID.md`](review_app/frontend/ANDROID.md).
+
 - **Import** handles pasted YouTube links/IDs, Discord imports, and an
   **Untracked files** tab (configured-folder files with no Library entry):
   preview, Add to Library, Send to Workspace.
@@ -105,7 +115,8 @@ python searcher.py
 SQLite is live app state. `matches.csv` and `matches.xlsx` are import/export
 formats; `check` marks and append-only decisions are preserved. The Chrome
 extension's `/api/likes/queue` integration is compatibility only; it consumes
-legacy `ids.txt`, not Workspace navigation.
+legacy `ids.txt`, not Workspace navigation. Android wrapper is mobile client;
+extension remains compatibility tooling.
 
 ## Tests
 

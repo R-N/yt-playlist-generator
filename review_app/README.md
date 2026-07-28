@@ -9,6 +9,16 @@ Primary navigation is **Import, Workspace, Library, Review, Activity, Settings**
 Pipeline, Playlist, and Discord are not primary screens. The old Local Files
 and Untracked screens are merged into Library.
 
+The UI is mobile responsive: primary navigation becomes a mobile drawer, and
+shared lists, toolbars, and tabs adapt to narrow screens. Android is a
+Capacitor 8 wrapper and mobile client. Native launch requires a persisted
+FastAPI LAN base URL entered as an `http://` or `https://` host and port (not
+`localhost`); browser requests remain relative same-origin. Build and device
+instructions are in [`frontend/ANDROID.md`](frontend/ANDROID.md). For device
+use, launch backend with `python run.py --host 0.0.0.0` and keep phone/server on
+same Wi-Fi. Cleartext HTTP and no backend authentication mean trusted LAN only;
+prefer HTTPS beyond trusted LAN.
+
 - **Import** owns pasted YouTube, Discord, and an **Untracked files** tab
   (configured-folder files with no Library entry): preview, Add to Library,
   Send to Workspace.

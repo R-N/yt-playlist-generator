@@ -64,4 +64,15 @@ const emit = defineEmits(['toggle', 'label', 'update:page', 'update:perPage'])
 .select-spacer { display: inline-block; width: 40px; }
 .dead-text { text-decoration: line-through; opacity: 0.6; }
 .is-dead { opacity: 0.75; }
+@media (max-width: 599px) {
+  .curation-list :deep(.v-list-item) { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; min-height: 72px; padding: 10px 8px; }
+  .curation-list :deep(.v-list-item__prepend) { grid-column: 1; grid-row: 1; }
+  .curation-list :deep(.v-list-item__content) { grid-column: 2; min-width: 0; }
+  .curation-list :deep(.v-list-item__append) { grid-column: 2; width: 100%; min-width: 0; justify-content: flex-start; flex-wrap: wrap; margin-inline-start: 0; margin-top: 7px; }
+  .curation-list :deep(.v-list-item-title), .curation-list :deep(.v-list-item-subtitle) { overflow-wrap: anywhere; }
+  .curation-list :deep(.v-list-item-subtitle) { white-space: normal; }
+  .curation-list :deep(.v-pagination__list) { flex-wrap: wrap; height: auto; gap: 2px; }
+  .curation-foot { flex-wrap: wrap; gap: 4px 8px; padding-inline: 8px !important; }
+  .curation-foot .v-pagination { margin-inline-start: auto; max-width: 100%; }
+}
 </style>

@@ -30,6 +30,7 @@ review_app/backend/review.db-wal
 review_app/backend/review.db-shm
 review_app/frontend/node_modules/
 review_app/frontend/dist/
+review_app/frontend/android/
 review_app/backups/
 review_app/backend/workspace_runs/
 

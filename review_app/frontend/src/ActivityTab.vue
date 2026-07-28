@@ -60,7 +60,7 @@ onUnmounted(() => clearInterval(poll))
   <div class="text-h4 mb-4">Activity</div>
   <v-alert v-if="error" type="error" closable class="mb-3" @click:close="error = ''">{{ error }}</v-alert>
   <v-card>
-    <v-tabs v-model="sub" color="primary" grow>
+    <v-tabs v-model="sub" color="primary" grow class="responsive-tabs">
       <v-tab value="tasks" prepend-icon="mdi-cog-sync-outline">Background tasks</v-tab>
       <v-tab value="history" prepend-icon="mdi-history">Decision history</v-tab>
     </v-tabs>

@@ -1,7 +1,29 @@
 /* Vuetify sizes in rem; shrinking the root scales the whole app down from its
    comfortable/mobile-ish defaults to a denser desktop feel. */
 :root { color-scheme: dark; font-size: 14px; }
-body { -webkit-font-smoothing: antialiased; }
+body { -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+.app-main, .v-application { min-width: 0; }
 .tab-wrap { width: min(100%, 1240px); margin: 0 auto; padding: 20px; }
 audio { width: 100%; }
-@media (max-width: 599px) { .tab-wrap { padding: 16px 12px 72px; } }
+.mobile-app-bar .v-toolbar-title { min-width: 0; }
+.responsive-toolbar { height: auto !important; min-height: 48px; }
+.responsive-toolbar .v-toolbar__content { height: auto !important; min-height: 48px; flex-wrap: wrap; gap: 2px; padding-block: 4px; }
+.responsive-toolbar .v-field { min-width: 140px; }
+.responsive-toolbar .v-text-field { flex: 1 1 220px !important; }
+.responsive-toolbar .v-btn { flex: 0 0 auto; }
+.responsive-tabs { overflow-x: auto; }
+.responsive-tabs .v-tabs__wrapper { overflow: visible; }
+.responsive-tabs .v-tab { flex: 0 0 auto; }
+.wrap-mobile { min-width: 0; }
+@media (max-width: 599px) {
+  .tab-wrap { padding: 16px 12px 72px; }
+  .text-h4 { font-size: 1.65rem !important; line-height: 1.2; }
+  .responsive-toolbar .v-toolbar__content { padding-inline: 6px; }
+  .responsive-toolbar .v-text-field { order: 10; flex-basis: 100% !important; margin: 4px 0 0 !important; }
+  .responsive-toolbar .v-input__control { width: 100%; }
+  .review-toolbar .v-select { min-width: min(200px, 100%) !important; max-width: 100% !important; }
+  .review-toolbar .v-btn { min-width: 40px; }
+  .mobile-stack-actions { flex-direction: column; align-items: stretch !important; }
+  .mobile-stack-actions > .v-btn { width: 100%; }
+  .app-main .v-dialog .v-card { max-width: calc(100vw - 24px); }
+}

@@ -354,7 +354,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 
 <template>
   <!-- Single row: filter, inline match metrics, icon decide buttons. -->
-  <div class="d-flex align-center flex-wrap mb-4" style="gap:6px 14px">
+  <div class="review-toolbar d-flex align-center flex-wrap mb-4" style="gap:6px 14px">
     <v-select v-model="status" :items="['unreviewed','approved','rejected','all']"
       density="compact" variant="solo-filled" flat hide-details
       prepend-inner-icon="mdi-filter-variant" style="min-width:200px;max-width:220px"

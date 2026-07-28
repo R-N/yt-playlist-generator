@@ -6,24 +6,32 @@ import LibraryTab from './LibraryTab.vue'
 import ActivityTab from './ActivityTab.vue'
 import SettingsTab from './SettingsTab.vue'
 import { activeTab as tab, PRIMARY_NAV } from './nav'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useDisplay } from 'vuetify'
+import NativeConnection from './NativeConnection.vue'
+import { clearNativeServerUrl, getNativeServerUrl, isNativeRuntime } from './native'
 
 const navigation = PRIMARY_NAV.filter((item) => item.value !== 'settings')
 const { mobile } = useDisplay()
+const native = isNativeRuntime()
+const serverUrl = ref(native ? getNativeServerUrl() : '')
+const connected = computed(() => !native || Boolean(serverUrl.value))
 // Desktop drawer must start open; temporary mobile drawer starts closed.
 const drawer = ref(!mobile.value)
 const rail = ref(false)   // desktop: collapse sidebar to icons
 function go(value) { tab.value = value; if (mobile.value) drawer.value = false }
+function connect(value) { serverUrl.value = value }
+function forgetServer() { clearNativeServerUrl(); serverUrl.value = '' }
 </script>
 
 <template>
   <v-app>
-    <v-app-bar v-if="mobile" flat density="comfortable" color="surface">
-      <v-app-bar-nav-icon aria-label="Open navigation" @click="drawer = true" />
-      <v-toolbar-title><v-icon color="primary" class="mr-2">mdi-music-circle</v-icon>Music Curator</v-toolbar-title>
+    <v-app-bar v-if="mobile || native" flat density="comfortable" color="surface" class="mobile-app-bar">
+      <v-app-bar-nav-icon v-if="connected" aria-label="Open navigation" @click="drawer = true" />
+      <v-toolbar-title class="text-truncate"><v-icon color="primary" class="mr-2">mdi-music-circle</v-icon>Music Curator</v-toolbar-title>
+      <v-btn v-if="native && connected" variant="text" size="small" prepend-icon="mdi-server-network" @click="forgetServer">Change server</v-btn>
     </v-app-bar>
-    <v-navigation-drawer v-model="drawer" :temporary="mobile" :permanent="!mobile" :rail="!mobile && rail" width="224" color="surface">
+    <v-navigation-drawer v-if="connected" v-model="drawer" :temporary="mobile" :permanent="!mobile" :rail="!mobile && rail" width="224" color="surface">
       <v-list nav>
         <v-list-item prepend-icon="mdi-music-circle" :title="rail ? '' : 'Music Curator'" style="cursor:pointer" :aria-label="rail ? 'Expand sidebar' : 'Collapse sidebar'" @click="rail = !rail">
           <template #append><v-icon v-if="!rail" size="small">mdi-backburger</v-icon></template>
@@ -36,8 +44,9 @@ function go(value) { tab.value = value; if (mobile.value) drawer.value = false }
       </v-list>
       <template #append><v-list nav density="comfortable"><v-list-item :active="tab === 'settings'" @click="go('settings')" prepend-icon="mdi-tune" title="Settings" rounded="lg" /></v-list></template>
     </v-navigation-drawer>
-    <v-main>
-      <v-window v-model="tab">
+    <v-main class="app-main">
+      <NativeConnection v-if="native && !connected" @connected="connect" />
+      <v-window v-else v-model="tab">
         <v-window-item value="import" :eager="true"><v-container class="tab-wrap" fluid><ImportTab /></v-container></v-window-item>
         <v-window-item value="workspace" :eager="true"><v-container class="tab-wrap" fluid><WorkspaceTab /></v-container></v-window-item>
         <v-window-item value="library" :eager="true"><v-container class="tab-wrap" fluid><LibraryTab /></v-container></v-window-item>

@@ -31,6 +31,15 @@ python run.py
 python run.py --dev
 ```
 
+Frontend is mobile responsive: primary navigation becomes a mobile drawer;
+shared lists, toolbars, and tabs adapt to narrow screens. Android is a
+Capacitor 8 mobile wrapper. Native launch requires persisted FastAPI LAN
+`http://` or `https://` host:port, not `localhost`; browser requests stay
+relative same-origin. Device backend uses `python run.py --host 0.0.0.0`;
+phone and server share Wi-Fi. Trusted LAN only: cleartext HTTP and no backend
+authentication. Prefer HTTPS beyond trusted LAN. The Chrome extension remains
+compatibility-only.
+
 ## Current app contract
 
 Primary nav: **Import, Workspace, Library, Review, Activity, Settings**.
@@ -210,9 +219,11 @@ were merged into Library.
   confirm, no token.
 - `explorer /select` reveal + native tkinter folder picker are localhost-only
   (server host = user machine).
-- Serve/open the app by hostname (`localhost`), never a bare IP: YouTube's
+- Browser serve/open uses hostname (`localhost`), never a bare IP: YouTube's
   embedded player rejects an IP-origin referer ("Video unavailable"). `run.py`
-  defaults `--host` to `localhost`; keep it a hostname.
+  defaults `--host` to `localhost`. Android uses the FastAPI server LAN
+  host:port; cleartext HTTP and missing backend authentication require trusted
+  LAN only.
 - Root scripts/plain files remain standalone compatibility, not app primary
   contract. Extension queue endpoint is compatibility only.
 

@@ -363,7 +363,7 @@ useTabRefresh('library', load)
 </script>
 
 <template>
-  <v-toolbar density="comfortable" class="mb-3 px-2 rounded-lg" color="surface" border>
+  <v-toolbar density="comfortable" class="responsive-toolbar mb-3 px-2 rounded-lg" color="surface" border>
     <v-checkbox-btn :model-value="allVisible" density="compact" aria-label="Select all visible" @update:model-value="toggleAll" />
     <span class="text-caption text-medium-emphasis mr-1">{{ selected.length ? `${selected.length} selected` : `${filtered.length} shown` }}</span>
     <v-btn icon variant="text" :loading="loading" aria-label="Refresh" @click="load">
@@ -447,4 +447,3 @@ useTabRefresh('library', load)
     Deletes the Library {{ removeConfirm?.count === 1 ? 'entry' : 'entries' }} and any downloaded file(s). Your mp3-folder files are not touched. This can't be undone.
   </ConfirmDialog>
 </template>
-

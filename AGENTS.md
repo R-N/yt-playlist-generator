@@ -41,6 +41,17 @@ python run.py --dev              # hot reload; Vite on :5173
 
 Retain root commands for compatibility. They are not app primary contract.
 
+The frontend is mobile responsive: primary navigation becomes a mobile drawer,
+and shared lists, toolbars, and tabs adapt to narrow screens. Android uses a
+Capacitor 8 wrapper. Native launch requires a persisted FastAPI LAN base URL,
+entered as an `http://` or `https://` host and port (not `localhost`); browser
+requests remain relative same-origin URLs. Device backend launch is
+`python run.py --host 0.0.0.0`; phone and server must share Wi-Fi. Use trusted
+LAN only because cleartext HTTP is enabled and backend has no authentication;
+prefer HTTPS beyond trusted LAN. See `review_app/frontend/ANDROID.md` for build
+and device setup. The Android wrapper is the mobile client; the Chrome
+extension remains compatibility-only.
+
 ## Workspace-first app
 
 Primary navigation is exactly: **Import, Workspace, Library, Review, Activity,
@@ -107,9 +118,11 @@ former Local Files and Untracked screens are folded into Library.
   there — but is otherwise identical (both share `useLocalDelete`). Download-file
   deletion is the app's own output (simple confirm, no token). `explorer /select`
   reveal and the tkinter folder picker are localhost-only (server = user machine).
-- Serve/open the app by hostname (`localhost`), never a bare IP: YouTube's
+- Browser serve/open uses hostname (`localhost`), never a bare IP: YouTube's
   embedded player rejects an IP-origin referer ("Video unavailable"). `run.py`
-  defaults `--host` to `localhost`.
+  defaults `--host` to `localhost`. Android device use instead enters the
+  FastAPI server's LAN host and port; use trusted LAN only because cleartext
+  HTTP is enabled and backend has no authentication.
 - Failed-download cleanup uses an immutable preview manifest and safeguards;
   it does not rescan a changing directory at confirmation time.
 - `GET /api/likes/queue` and the Chrome extension are compatibility only; they

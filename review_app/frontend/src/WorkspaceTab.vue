@@ -418,7 +418,7 @@ onUnmounted(() => clearInterval(poll))
     <div class="d-flex align-center">Showing {{ workspaceFocusIds.length }} focused item(s).<v-spacer /><v-btn size="small" variant="text" prepend-icon="mdi-close" @click="workspaceFocusIds = null">Clear</v-btn></div>
   </v-alert>
 
-  <v-toolbar density="comfortable" class="mb-3 px-2 rounded-lg" color="surface" border>
+  <v-toolbar density="comfortable" class="responsive-toolbar mb-3 px-2 rounded-lg" color="surface" border>
     <v-checkbox-btn :model-value="allSelected" aria-label="Select all live items" @update:model-value="toggleAll" />
     <v-btn icon variant="text" :loading="loading" aria-label="Refresh" @click="load">
       <v-icon>mdi-refresh</v-icon><v-tooltip activator="parent" location="bottom">Refresh list</v-tooltip>
@@ -559,4 +559,3 @@ onUnmounted(() => clearInterval(poll))
     </v-card>
   </v-dialog>
 </template>
-
