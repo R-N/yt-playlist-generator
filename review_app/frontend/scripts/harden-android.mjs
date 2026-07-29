@@ -55,10 +55,32 @@ def releaseSigning = [
     ANDROID_KEY_ALIAS: signingValue('ANDROID_KEY_ALIAS'),
     ANDROID_KEY_PASSWORD: signingValue('ANDROID_KEY_PASSWORD'),
 ]
+def releaseVersionCode = signingValue('ANDROID_VERSION_CODE')
+def releaseVersionName = signingValue('ANDROID_VERSION_NAME')
+// Regexes here stay slashy and backslash-free: this file is a JS template, and
+// JS eats unknown escapes before Groovy ever sees them.
+def validateReleaseVersion = {
+    def parts = releaseVersionName.tokenize('.')
+    if (parts.size() != 3 || parts.any { !(it ==~ /[0-9]+/) }) {
+        throw new GradleException("Release ANDROID_VERSION_NAME must be MAJOR.MINOR.PATCH: '\${releaseVersionName}'")
+    }
+    def major = parts[0].toLong(), minor = parts[1].toLong(), patch = parts[2].toLong()
+    if (major > 2099L || minor > 999L || patch > 999L) {
+        throw new GradleException("Release version out of range (max 2099.999.999): '\${releaseVersionName}'")
+    }
+    def expected = major * 1000000L + minor * 1000L + patch
+    if (!(releaseVersionCode ==~ /[1-9][0-9]*/) || releaseVersionCode.toLong() != expected) {
+        throw new GradleException("Release ANDROID_VERSION_CODE must be \${expected} for version \${releaseVersionName}")
+    }
+    if (expected < 1L || expected > 2100000000L) {
+        throw new GradleException("Release version code out of range: \${expected}")
+    }
+}
 def validateReleaseSigning = {
     releaseSigning.each { name, value ->
         if (value == null || value.trim().isEmpty()) throw new GradleException("Missing release signing value: \${name}")
     }
+    validateReleaseVersion()
     def keystoreFile = file(releaseSigning.ANDROID_KEYSTORE_PATH)
     if (!keystoreFile.isFile()) throw new GradleException("Release keystore not found: \${keystoreFile}")
     def pinFile = file("../../release-cert-sha256.txt")
@@ -102,7 +124,13 @@ gradle.taskGraph.whenReady { taskGraph ->
       'Android build.gradle carries an outdated signing patch. Delete review_app/frontend/android/ and re-run `npx cap add android`.',
     )
   }
-  return buildGradle.replace(androidBlock, (match) => `${signingCode}\n${match}${signingConfig}`)
+  const versioned = buildGradle
+    .replace(/\bversionCode\s+\d+/, 'versionCode releaseVersionCode ? releaseVersionCode.toInteger() : 1')
+    .replace(/\bversionName\s+"[^"]*"/, 'versionName releaseVersionName ?: "1.0"')
+  if (!versioned.includes('versionCode releaseVersionCode') || !versioned.includes('versionName releaseVersionName')) {
+    throw new Error('Android build.gradle versionCode/versionName not found; release version cannot be pinned.')
+  }
+  return versioned.replace(androidBlock, (match) => `${signingCode}\n${match}${signingConfig}`)
 }
 
 export async function hardenBuildGradleFile(buildGradlePath = defaultBuildGradlePath) {

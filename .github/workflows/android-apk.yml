@@ -2,6 +2,11 @@ name: Android release APK
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (MAJOR.MINOR.PATCH)'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,9 +15,35 @@ jobs:
   build:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
+    # Signing secrets live in this Environment, so no other workflow can read them.
+    environment: android-release
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Select and validate release version
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="$MANUAL_VERSION"
+          [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo 'Version must be MAJOR.MINOR.PATCH.' >&2; exit 1; }
+          major=$((10#${BASH_REMATCH[1]})); minor=$((10#${BASH_REMATCH[2]})); patch=$((10#${BASH_REMATCH[3]}))
+          (( major <= 2099 && minor <= 999 && patch <= 999 ))
+          code=$((major * 1000000 + minor * 1000 + patch))
+          (( code > 0 && code <= 2100000000 ))
+          # Every prior release tag must be lower, so an installed APK can always
+          # be replaced by a later one.
+          while IFS= read -r tag; do
+            [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || continue
+            prior=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]}))
+            (( prior < code )) || { printf 'Version %s is not greater than tag %s\n' "$version" "$tag" >&2; exit 1; }
+          done < <(git tag --list 'v*')
+          {
+            printf 'ANDROID_VERSION_CODE=%s\n' "$code"
+            printf 'ANDROID_VERSION_NAME=%s\n' "$version"
+          } >> "$GITHUB_ENV"
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -67,6 +98,6 @@ jobs:
       - name: Upload release APK
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: android-release-apk
+          name: android-release-apk-${{ inputs.version }}
           if-no-files-found: error
           path: review_app/frontend/android/app/build/outputs/apk/release/app-release.apk

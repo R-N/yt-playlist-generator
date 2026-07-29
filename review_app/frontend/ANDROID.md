@@ -49,11 +49,20 @@ ANDROID_KEYSTORE_PATH=../../.android-signing/yt-playlist-generator-release.jks
 ANDROID_KEYSTORE_PASSWORD=your-keystore-password
 ANDROID_KEY_ALIAS=your-key-alias
 ANDROID_KEY_PASSWORD=your-key-password
+ANDROID_VERSION_NAME=1.0.0
+ANDROID_VERSION_CODE=1000000
 ```
 
-Environment variables with those exact four names override properties-file
-values. Release tasks fail if any value, JKS, alias, certificate pin, or
-certificate match is missing.
+Environment variables with those exact names override properties-file values.
+Release tasks fail if any value, JKS, alias, certificate pin, certificate match,
+or version is missing.
+
+`ANDROID_VERSION_CODE` must equal `major * 1000000 + minor * 1000 + patch` of
+`ANDROID_VERSION_NAME`, which must be `MAJOR.MINOR.PATCH` within
+`2099.999.999`. Android refuses to install an APK over one with a higher
+versionCode, so the derived code keeps local and CI builds of the same version
+interchangeable and later versions always installable. Debug builds ignore both
+values and stay at `1` / `1.0`.
 
 Passwords must be plain alphanumeric. `.properties` parsing strips line
 terminators and honours backslash escapes, so a password containing `\`, a
@@ -88,18 +97,34 @@ npm run android:build
 The release APK is
 `android/app/build/outputs/apk/release/app-release.apk`.
 
-`.github/workflows/android-apk.yml` is manual-dispatch only and runs only on the
-default branch. It needs four repository secrets — `ANDROID_KEYSTORE_BASE64`
-(base64 of the exact same JKS), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
-`ANDROID_KEY_PASSWORD` — decodes the JKS only into runner temporary storage at
-mode 600, and fails the run if the built APK's certificate does not match the
-tracked pin. Never print secret values. Base64 for the secret:
+`.github/workflows/android-apk.yml` is manual-dispatch only, runs only on the
+default branch, and takes a required `MAJOR.MINOR.PATCH` version input. It
+derives the versionCode, rejects a version that is not greater than every
+existing `vMAJOR.MINOR.PATCH` tag, decodes the JKS only into runner temporary
+storage at mode 600, and fails the run if the built APK's certificate does not
+match the tracked pin.
+
+Its four secrets — `ANDROID_KEYSTORE_BASE64` (base64 of the exact same JKS),
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` — live
+in the **`android-release` Environment**, not at repository level, so no other
+workflow in the repo can read the signing key. The Environment is restricted to
+the `main` branch. Never print secret values. Base64 for the secret:
 
 ```powershell
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("review_app/frontend/.android-signing/yt-playlist-generator-release.jks")) | Set-Clipboard
 ```
 
 ## Development on a phone
+
+**No backend address is baked into the APK.** The user types it on first launch
+and it is kept in `localStorage`; `normalizeNativeServerUrl` in `src/native.js`
+validates it by *range* (RFC1918) rather than against any specific host, so a
+DHCP-assigned server address needs no rebuild and no re-signing. Literal
+addresses appear only in this file's examples and in `src/native.test.js`
+fixtures — never in shipped configuration. Keep it that way: pinning one host
+would mean re-signing the APK whenever the LAN address changed, and Android's
+Network Security Config cannot express a CIDR range to do it at the OS layer
+either.
 
 `server.cleartext` is enabled for trusted-LAN use only. Native `http://` backend
 addresses must be literal RFC1918 IPv4 addresses (`10/8`, `172.16/12`, or

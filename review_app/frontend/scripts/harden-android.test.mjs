@@ -8,6 +8,21 @@ import {
   hardenManifestFile,
 } from './harden-android.mjs'
 
+// Mirrors the shape Capacitor generates: the patch has to find defaultConfig's
+// versionCode/versionName to pin a release version.
+const buildGradleFixture = [
+  "plugins { id 'com.android.application' }",
+  '',
+  'android {',
+  "    namespace 'example'",
+  '    defaultConfig {',
+  '        versionCode 1',
+  '        versionName "1.0"',
+  '    }',
+  '}',
+  '',
+].join('\n')
+
 describe('Android hardening', () => {
   it('patches generated manifest and remains idempotent', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'harden-android-'))
@@ -27,8 +42,7 @@ describe('Android hardening', () => {
   })
 
   it('patches generated build.gradle and remains idempotent', () => {
-    const fixture = 'plugins { id \'com.android.application\' }\n\nandroid {\n    namespace \'example\'\n}\n'
-    const hardened = hardenBuildGradle(fixture)
+    const hardened = hardenBuildGradle(buildGradleFixture)
     expect(hardened).toContain('file("../../.android-signing/signing.properties")')
     expect(hardened).toMatch(/taskGraph\.allTasks[\s\S]*contains\('release'\)/)
     expect(hardened).not.toContain('gradle.startParameter.taskNames')
@@ -38,12 +52,23 @@ describe('Android hardening', () => {
     // Groovy reads '\s' as a space escape, so the pin must be stripped with a slashy regex.
     expect(hardened).toContain("replaceAll(/[^0-9A-Fa-f]/, '')")
     expect(hardened).not.toContain("replaceAll('\\s', '')")
+    // This file is a JS template: JS strips unknown escapes before Groovy sees
+    // them, so the emitted Gradle must contain no backslash at all.
+    expect(hardened).not.toContain('\\')
+    expect(hardened).toContain('versionCode releaseVersionCode ? releaseVersionCode.toInteger() : 1')
+    expect(hardened).toContain('versionName releaseVersionName ?: "1.0"')
+    expect(hardened).not.toMatch(/versionCode\s+1$/m)
+    expect(hardened).toMatch(/validateReleaseVersion\(\)/)
     expect(hardenBuildGradle(hardened)).toBe(hardened)
   })
 
-  it('rejects an outdated signing patch instead of leaving it stale', () => {
+  it('refuses to patch when defaultConfig has no version fields to pin', () => {
     const fixture = 'android {\n    namespace \'example\'\n}\n'
-    const stale = hardenBuildGradle(fixture).replace('debuggable false\n', '')
+    expect(() => hardenBuildGradle(fixture)).toThrow(/versionCode\/versionName not found/)
+  })
+
+  it('rejects an outdated signing patch instead of leaving it stale', () => {
+    const stale = hardenBuildGradle(buildGradleFixture).replace('debuggable false\n', '')
     expect(() => hardenBuildGradle(stale)).toThrow(/outdated signing patch/)
   })
 
