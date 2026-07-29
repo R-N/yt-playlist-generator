@@ -22,7 +22,7 @@ jobs:
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
       - name: Setup Android SDK
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
       - name: Install and build web assets
