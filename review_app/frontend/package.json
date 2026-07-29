@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -11,7 +14,8 @@
     "android:sync": "cap sync android && npm run android:prepare",
     "android:prepare": "node scripts/harden-android.mjs",
     "android:open": "npm run android:sync && cap open android",
-    "android:build": "npm run build && npm run android:sync && cd /d android && gradlew.bat assembleDebug"
+    "android:build": "npm run build && npm run android:sync && cd /d android && gradlew.bat assembleRelease",
+    "android:debug": "npm run build && npm run android:sync && cd /d android && gradlew.bat assembleDebug"
   },
   "dependencies": {
     "@capacitor/core": "^8.0.0",

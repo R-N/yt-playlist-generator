@@ -1,4 +1,4 @@
-name: Android debug APK
+name: Android release APK
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ permissions:
 
 jobs:
   build:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,12 +35,38 @@ jobs:
       - name: Prepare Android project
         working-directory: review_app/frontend
         run: npm run android:prepare
-      - name: Assemble debug APK
+      - name: Decode release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/yt-playlist-generator-release.jks"
+          chmod 600 "$RUNNER_TEMP/yt-playlist-generator-release.jks"
+      - name: Assemble release APK
         working-directory: review_app/frontend/android
-        run: ./gradlew assembleDebug --no-daemon
-      - name: Upload debug APK
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/yt-playlist-generator-release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
+      - name: Verify release certificate
+        working-directory: review_app/frontend/android
+        run: |
+          set -euo pipefail
+          test -s ../release-cert-sha256.txt || { echo 'Missing release certificate fingerprint pin.' >&2; exit 1; }
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Android SDK not installed}}"
+          build_tools="$(find "$sdk_root/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
+          test -x "$build_tools"
+          "$build_tools" verify --print-certs app/build/outputs/apk/release/app-release.apk > "$RUNNER_TEMP/apksigner-certs.txt" 2>&1
+          expected="$(tr -d ':[:space:]\r\n' < ../release-cert-sha256.txt | tr '[:lower:]' '[:upper:]')"
+          actual="$(awk 'index($0, "SHA-256 digest:") { sub(/^.*SHA-256 digest:[[:space:]]*/, ""); print; exit }' "$RUNNER_TEMP/apksigner-certs.txt" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
+          [[ "$expected" =~ ^[0-9A-F]{64}$ ]]
+          [[ "$actual" == "$expected" ]] || { printf 'Certificate fingerprint mismatch: expected %s, APK %s\n' "$expected" "$actual" >&2; exit 1; }
+      - name: Upload release APK
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: android-debug-apk
+          name: android-release-apk
           if-no-files-found: error
-          path: review_app/frontend/android/app/build/outputs/apk/debug/app-debug.apk
+          path: review_app/frontend/android/app/build/outputs/apk/release/app-release.apk

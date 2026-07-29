@@ -31,6 +31,10 @@ review_app/backend/review.db-shm
 review_app/frontend/node_modules/
 review_app/frontend/dist/
 review_app/frontend/android/
+review_app/frontend/.android-signing/
+# Signing material never belongs in the repo, wherever it lands.
+*.jks
+signing.properties
 review_app/backups/
 review_app/backend/workspace_runs/
 
