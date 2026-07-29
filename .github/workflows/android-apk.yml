@@ -35,8 +35,8 @@ jobs:
         working-directory: review_app/frontend
         run: npm run android:prepare
       - name: Assemble debug APK
-        working-directory: review_app/frontend
-        run: ./android/gradlew assembleDebug --no-daemon
+        working-directory: review_app/frontend/android
+        run: ./gradlew assembleDebug --no-daemon
       - name: Upload debug APK
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
