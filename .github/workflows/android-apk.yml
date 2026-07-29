@@ -15,7 +15,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: review_app/frontend/package-lock.json
       - name: Setup Java
@@ -30,7 +30,7 @@ jobs:
         run: npm ci && npm run build
       - name: Sync Capacitor Android project
         working-directory: review_app/frontend
-        run: npx cap sync android
+        run: npx cap add android && npx cap sync android
       - name: Prepare Android project
         working-directory: review_app/frontend
         run: npm run android:prepare
