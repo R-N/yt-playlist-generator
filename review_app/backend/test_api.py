@@ -93,6 +93,52 @@ class ApiTestBase(unittest.TestCase):
 
 
 class EndpointTest(ApiTestBase):
+    def test_native_os_endpoints_require_loopback_client(self):
+        with mock.patch.object(main, "_native_pick_folder", return_value="C:\\picked"), \
+             mock.patch.object(main, "_native_pick_files", return_value=["C:\\picked\\a.mp3"]), \
+             mock.patch.object(main, "_download_file_path", return_value=os.path.join(self.tmp.name, "a.mp3")), \
+             mock.patch.object(main.subprocess, "run"):
+            with open(os.path.join(self.tmp.name, "a.mp3"), "wb") as stream:
+                stream.write(b"audio")
+            for endpoint, body in (
+                ("/api/pick-folder", {}),
+                ("/api/pick-files", {}),
+                ("/api/reveal", {"download_yt_id": "a"}),
+            ):
+                with self.subTest(endpoint=endpoint):
+                    response = self.client.post(endpoint, json=body)
+                    self.assertEqual(response.status_code, 403)
+
+    def test_native_os_endpoints_allow_loopback_client(self):
+        loopback = TestClient(main.app, client=("127.0.0.1", 43210))
+        loopback.__enter__()
+        try:
+            with mock.patch.object(main, "_native_pick_folder", return_value="C:\\picked"), \
+                 mock.patch.object(main, "_native_pick_files", return_value=["C:\\picked\\a.mp3"]), \
+                 mock.patch.object(main, "_download_file_path", return_value=os.path.join(self.tmp.name, "a.mp3")), \
+                 mock.patch.object(main.subprocess, "run"):
+                with open(os.path.join(self.tmp.name, "a.mp3"), "wb") as stream:
+                    stream.write(b"audio")
+                self.assertEqual(loopback.post("/api/pick-folder").status_code, 200)
+                self.assertEqual(loopback.post("/api/pick-files").status_code, 200)
+                self.assertEqual(loopback.post("/api/reveal", json={"download_yt_id": "a"}).status_code, 200)
+        finally:
+            loopback.__exit__(None, None, None)
+
+    def test_native_os_endpoints_reject_proxied_and_cross_site_requests(self):
+        loopback = TestClient(main.app, client=("127.0.0.1", 43210))
+        loopback.__enter__()
+        try:
+            for headers in (
+                {"X-Forwarded-For": "192.168.1.20"},
+                {"Origin": "https://evil.example"},
+                {"Sec-Fetch-Site": "cross-site"},
+            ):
+                with self.subTest(headers=headers):
+                    self.assertEqual(loopback.post("/api/pick-folder", headers=headers).status_code, 403)
+        finally:
+            loopback.__exit__(None, None, None)
+
     def test_cleanup_preview_empty_when_downloads_root_missing_or_file(self):
         original_root = main.REPO_ROOT
         root = tempfile.TemporaryDirectory()

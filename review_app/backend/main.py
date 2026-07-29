@@ -9,6 +9,7 @@ Safety posture:
 import os
 import contextlib
 import csv
+import ipaddress
 import importlib.util
 import io
 import json
@@ -26,7 +27,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Annotated, Mapping
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -52,8 +53,8 @@ app.add_middleware(
         "http://localhost:5173", "http://127.0.0.1:5173",
         "http://localhost", "https://localhost",
     ],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Content-Type"],
 )
 
 _AUDIO_MEDIA_TYPES = {
@@ -2372,10 +2373,39 @@ class RevealRef(BaseModel):
     download_yt_id: str | None = None
 
 
+def _is_loopback_origin(origin):
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path or parsed.params or parsed.query or parsed.fragment:
+        return False
+    try:
+        return ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        return parsed.hostname.lower() == "localhost"
+
+
+def _require_loopback(request: Request):
+    """Allow native OS integration only from same-machine, non-proxied clients."""
+    if request.headers.get("forwarded") or request.headers.get("x-forwarded-for"):
+        raise HTTPException(status_code=403, detail="native OS endpoints reject proxied clients")
+    origin = request.headers.get("origin")
+    if origin and not _is_loopback_origin(origin):
+        raise HTTPException(status_code=403, detail="native OS endpoints require loopback origin")
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        raise HTTPException(status_code=403, detail="native OS endpoints reject cross-site requests")
+    host = request.client.host if request.client else None
+    try:
+        is_loopback = ipaddress.ip_address(host).is_loopback
+    except (TypeError, ValueError):
+        is_loopback = False
+    if not is_loopback:
+        raise HTTPException(status_code=403, detail="native OS endpoints require loopback client")
+
+
 @app.post("/api/reveal")
-def api_reveal(req: RevealRef):
+def api_reveal(req: RevealRef, request: Request):
     """Open the OS file browser with the file selected (localhost only, so the
     server host is the user's machine). Path resolved + safety-checked first."""
+    _require_loopback(request)
     path = None
     if req.download_yt_id is not None:
         path = _download_file_path(req.download_yt_id)
@@ -2835,9 +2865,10 @@ def _native_pick_folder():
 
 
 @app.post("/api/pick-folder")
-def api_pick_folder():
+def api_pick_folder(request: Request):
     """Pop the native folder picker on the server machine (localhost). Returns the
     picked path; the client adds it to the editable folder list, then saves+rescans."""
+    _require_loopback(request)
     path = _native_pick_folder()
     if not path:
         raise HTTPException(status_code=409, detail="folder picker cancelled or unavailable")
@@ -2865,9 +2896,10 @@ def _native_pick_files():
 
 
 @app.post("/api/pick-files")
-def api_pick_files():
+def api_pick_files(request: Request):
     """Pop the native multi-file picker on the server machine (localhost). Returns the
     picked absolute paths; the client hands them to /api/files/add with a target."""
+    _require_loopback(request)
     return {"paths": _native_pick_files()}
 
 

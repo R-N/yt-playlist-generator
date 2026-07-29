@@ -1,0 +1,46 @@
+name: Android debug APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: review_app/frontend/package-lock.json
+      - name: Setup Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+      - name: Install and build web assets
+        working-directory: review_app/frontend
+        run: npm ci && npm run build
+      - name: Sync Capacitor Android project
+        working-directory: review_app/frontend
+        run: npx cap sync android
+      - name: Prepare Android project
+        working-directory: review_app/frontend
+        run: npm run android:prepare
+      - name: Assemble debug APK
+        working-directory: review_app/frontend
+        run: ./android/gradlew assembleDebug --no-daemon
+      - name: Upload debug APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-debug-apk
+          if-no-files-found: error
+          path: review_app/frontend/android/app/build/outputs/apk/debug/app-debug.apk

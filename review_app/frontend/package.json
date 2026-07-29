@@ -8,8 +8,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "android:sync": "cap sync android",
-    "android:open": "cap open android"
+    "android:sync": "cap sync android && npm run android:prepare",
+    "android:prepare": "node scripts/harden-android.mjs",
+    "android:open": "npm run android:sync && cap open android",
+    "android:build": "npm run build && npm run android:sync && cd /d android && gradlew.bat assembleDebug"
   },
   "dependencies": {
     "@capacitor/core": "^8.0.0",
