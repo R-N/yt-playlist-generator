@@ -37,6 +37,30 @@ describe('Android hardening', () => {
     expect(hardenManifest(hardened)).toBe(hardened)
   })
 
+  it('overrides the attributes Capacitor already emits', () => {
+    // Capacitor's template ships android:allowBackup="true", so the replace
+    // branch — not the insert branch — is the one that runs in a real project.
+    const generated = [
+      '<manifest xmlns:android="http://schemas.android.com/apk/res/android">',
+      '    <application',
+      '        android:allowBackup="true"',
+      '        android:usesCleartextTraffic="false"',
+      '        android:label="@string/app_name">',
+      '    </application>',
+      '</manifest>',
+    ].join('\n')
+    const hardened = hardenManifest(generated)
+
+    expect(hardened).toContain('android:allowBackup="false"')
+    expect(hardened).not.toContain('android:allowBackup="true"')
+    expect(hardened).toContain('android:usesCleartextTraffic="true"')
+    expect(hardened).not.toContain('android:usesCleartextTraffic="false"')
+    expect(hardened.match(/android:allowBackup=/g)).toHaveLength(1)
+    expect(hardened.match(/android:usesCleartextTraffic=/g)).toHaveLength(1)
+    expect(hardened).toContain('android:label="@string/app_name"')
+    expect(hardenManifest(hardened)).toBe(hardened)
+  })
+
   it('fails clearly when application element is missing', () => {
     expect(() => hardenManifest('<manifest></manifest>')).toThrow(/Android manifest application element not found/)
   })

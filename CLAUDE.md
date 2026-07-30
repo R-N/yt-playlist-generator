@@ -37,8 +37,15 @@ Capacitor 8 mobile wrapper. Native launch requires persisted FastAPI LAN
 `http://` or `https://` host:port, not `localhost`; browser requests stay
 relative same-origin. Device backend uses `python run.py --host 0.0.0.0`;
 phone and server share Wi-Fi. Trusted LAN only: cleartext HTTP and no backend
-authentication. Prefer HTTPS beyond trusted LAN. The Chrome extension remains
-compatibility-only.
+authentication. Prefer HTTPS beyond trusted LAN. **No backend address is baked
+into the APK** — the user enters it, `normalizeNativeServerUrl` validates by
+RFC1918 range (not a specific host) and re-validates on every read, so DHCP
+changes need no rebuild; literal addresses live only in docs and test fixtures.
+`android/` is generated + gitignored, re-hardened by
+`scripts/harden-android.mjs` after every sync (it fails loudly on a stale
+patch); local and CI release builds share one gitignored keystore pinned to the
+tracked `release-cert-sha256.txt`. See `review_app/frontend/ANDROID.md`. The
+Chrome extension remains compatibility-only.
 
 ## Current app contract
 
@@ -223,7 +230,9 @@ were merged into Library.
   embedded player rejects an IP-origin referer ("Video unavailable"). `run.py`
   defaults `--host` to `localhost`. Android uses the FastAPI server LAN
   host:port; cleartext HTTP and missing backend authentication require trusted
-  LAN only.
+  LAN only. Never hardcode that address in shipped code — it is user-entered
+  and range-validated, and an invalid stored value yields no base URL so API
+  calls throw instead of hitting the WebView's own origin.
 - Root scripts/plain files remain standalone compatibility, not app primary
   contract. Extension queue endpoint is compatibility only.
 

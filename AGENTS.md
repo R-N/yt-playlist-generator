@@ -48,9 +48,17 @@ entered as an `http://` or `https://` host and port (not `localhost`); browser
 requests remain relative same-origin URLs. Device backend launch is
 `python run.py --host 0.0.0.0`; phone and server must share Wi-Fi. Use trusted
 LAN only because cleartext HTTP is enabled and backend has no authentication;
-prefer HTTPS beyond trusted LAN. See `review_app/frontend/ANDROID.md` for build
-and device setup. The Android wrapper is the mobile client; the Chrome
-extension remains compatibility-only.
+prefer HTTPS beyond trusted LAN. No backend address is baked into the APK: the
+user enters it, `normalizeNativeServerUrl` validates it by RFC1918 range rather
+than against a specific host, and it is re-validated on every read, so a DHCP
+change needs no rebuild and no re-signed APK. Literal addresses appear only in
+docs and test fixtures. `android/` is generated and gitignored;
+`scripts/harden-android.mjs` re-applies the manifest and Gradle hardening after
+every sync, and refuses to build over an out-of-date patch. Local and CI
+release builds share one gitignored keystore and are pinned to the tracked
+certificate fingerprint. See `review_app/frontend/ANDROID.md` for build and
+device setup. The Android wrapper is the mobile client; the Chrome extension
+remains compatibility-only.
 
 ## Workspace-first app
 
@@ -122,7 +130,10 @@ former Local Files and Untracked screens are folded into Library.
   embedded player rejects an IP-origin referer ("Video unavailable"). `run.py`
   defaults `--host` to `localhost`. Android device use instead enters the
   FastAPI server's LAN host and port; use trusted LAN only because cleartext
-  HTTP is enabled and backend has no authentication.
+  HTTP is enabled and backend has no authentication. Never hardcode that
+  address anywhere in shipped code — it is user-entered and range-validated,
+  and an invalid or downgraded stored value falls back to no base URL, which
+  makes API calls throw rather than target the WebView's own origin.
 - Failed-download cleanup uses an immutable preview manifest and safeguards;
   it does not rescan a changing directory at confirmation time.
 - `GET /api/likes/queue` and the Chrome extension are compatibility only; they

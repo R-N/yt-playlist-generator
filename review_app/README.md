@@ -17,7 +17,9 @@ FastAPI LAN base URL entered as an `http://` or `https://` host and port (not
 instructions are in [`frontend/ANDROID.md`](frontend/ANDROID.md). For device
 use, launch backend with `python run.py --host 0.0.0.0` and keep phone/server on
 same Wi-Fi. Cleartext HTTP and no backend authentication mean trusted LAN only;
-prefer HTTPS beyond trusted LAN.
+prefer HTTPS beyond trusted LAN. No server address is built into the APK — you
+enter it on first launch and it is validated by RFC1918 range, so a new DHCP
+address needs no rebuild or re-signed APK.
 
 - **Import** owns pasted YouTube, Discord, and an **Untracked files** tab
   (configured-folder files with no Library entry): preview, Add to Library,

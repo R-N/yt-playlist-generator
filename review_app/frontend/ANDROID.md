@@ -27,6 +27,16 @@ The patch does not rewrite itself in place. After changing
 — an out-of-date patch fails the build loudly instead of building something
 half-hardened. CI always starts from a fresh platform, so it never hits this.
 
+`npm run test` covers the hardening and the address rules: the manifest patch
+against both an attribute-free `<application>` and the one Capacitor really
+generates (`android:allowBackup="true"`, so the override branch is exercised,
+not just the insert branch), the emitted Gradle staying backslash-free,
+idempotency, the stale-patch and missing-version failures, and
+`normalizeNativeServerUrl` accepting/rejecting addresses plus failing closed on
+a tampered stored value. The Gradle certificate and version checks and the
+workflow's tag gate are not unit-testable; they are verified by an actual
+release build.
+
 Debug keeps Android's default debug signing, whose keystore is generated per
 machine — a local debug APK and a CI debug APK never share a certificate. Use
 the release build whenever the signature has to match:

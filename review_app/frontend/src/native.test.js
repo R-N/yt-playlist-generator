@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from './api'
-import { NATIVE_SERVER_URL_KEY, normalizeNativeServerUrl } from './native'
+import {
+  NATIVE_SERVER_URL_KEY,
+  clearNativeServerUrl,
+  getNativeServerUrl,
+  normalizeNativeServerUrl,
+  setNativeServerUrl,
+} from './native'
 
 let storage
 
@@ -19,6 +25,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+// Every literal address below is a test fixture. No backend address is
+// hardcoded in shipped code — the user enters it and it is validated by range.
 describe('native server URLs', () => {
   it('accepts private IPv4 HTTP addresses and valid HTTPS hosts', () => {
     expect(normalizeNativeServerUrl('http://10.0.0.8:8000/')).toBe('http://10.0.0.8:8000')
@@ -40,6 +48,34 @@ describe('native server URLs', () => {
     expect(() => normalizeNativeServerUrl('https://user:pass@server.test:8000')).toThrow()
     expect(() => normalizeNativeServerUrl('https://localhost:8000')).toThrow()
     expect(() => normalizeNativeServerUrl('ftp://server.test:8000')).toThrow()
+  })
+
+  it('re-validates the persisted address instead of trusting storage', () => {
+    // localStorage is not a trust boundary: a value written before a rule
+    // tightened, or by anything else on the device, must not become a base URL.
+    for (const tampered of ['http://8.8.8.8:8000', 'https://server.test/api', 'not a url', '']) {
+      localStorage.setItem(NATIVE_SERVER_URL_KEY, tampered)
+      expect(getNativeServerUrl()).toBe('')
+    }
+  })
+
+  it('fails closed when native runtime has no usable server address', () => {
+    vi.stubGlobal('window', { Capacitor: { isNativePlatform: () => true } })
+    localStorage.setItem(NATIVE_SERVER_URL_KEY, 'http://8.8.8.8:8000')
+
+    // A relative fallback would resolve against the WebView origin, so throw.
+    expect(() => api.audioUrl('abcdefghijk')).toThrow(/Connect to FastAPI server/)
+  })
+
+  it('stores only normalized addresses and clears on demand', () => {
+    expect(setNativeServerUrl(' http://192.168.1.20:8000/ ')).toBe('http://192.168.1.20:8000')
+    expect(localStorage.getItem(NATIVE_SERVER_URL_KEY)).toBe('http://192.168.1.20:8000')
+
+    expect(() => setNativeServerUrl('http://8.8.8.8:8000')).toThrow()
+    expect(localStorage.getItem(NATIVE_SERVER_URL_KEY)).toBe('http://192.168.1.20:8000')
+
+    clearNativeServerUrl()
+    expect(getNativeServerUrl()).toBe('')
   })
 
   it('uses persisted native server base for audio URLs', () => {

@@ -77,7 +77,25 @@ class ApiTestBase(unittest.TestCase):
         self.ids = {r["filename"]: r["id"]
                     for r in self.client.get("/api/rows?status=all").json()["rows"]}
 
+    def loopback_client(self):
+        """Native OS endpoints demand a loopback peer; TestClient's default host isn't one."""
+        client = TestClient(main.app, client=("127.0.0.1", 43210))
+        client.__enter__()
+        self.addCleanup(client.__exit__, None, None, None)
+        return client
+
+    def drain_tasks(self):
+        """Background sweeps hold the SQLite file open and the global task slot.
+        Windows refuses to delete a locked file, so finish them before cleanup."""
+        for task_id, thread in list(tasks._threads.items()):
+            tasks._cancel.add(task_id)
+            thread.join(timeout=15)
+        tasks._threads.clear()
+        tasks._cancel.clear()
+        tasks._active = None
+
     def tearDown(self):
+        self.drain_tasks()
         self.client.__exit__(None, None, None)
         for k, v in self._orig_db.items():
             setattr(db, k, v)
@@ -110,34 +128,36 @@ class EndpointTest(ApiTestBase):
                     self.assertEqual(response.status_code, 403)
 
     def test_native_os_endpoints_allow_loopback_client(self):
-        loopback = TestClient(main.app, client=("127.0.0.1", 43210))
-        loopback.__enter__()
-        try:
-            with mock.patch.object(main, "_native_pick_folder", return_value="C:\\picked"), \
-                 mock.patch.object(main, "_native_pick_files", return_value=["C:\\picked\\a.mp3"]), \
-                 mock.patch.object(main, "_download_file_path", return_value=os.path.join(self.tmp.name, "a.mp3")), \
-                 mock.patch.object(main.subprocess, "run"):
-                with open(os.path.join(self.tmp.name, "a.mp3"), "wb") as stream:
-                    stream.write(b"audio")
-                self.assertEqual(loopback.post("/api/pick-folder").status_code, 200)
-                self.assertEqual(loopback.post("/api/pick-files").status_code, 200)
-                self.assertEqual(loopback.post("/api/reveal", json={"download_yt_id": "a"}).status_code, 200)
-        finally:
-            loopback.__exit__(None, None, None)
+        loopback = self.loopback_client()
+        with mock.patch.object(main, "_native_pick_folder", return_value="C:\\picked"), \
+             mock.patch.object(main, "_native_pick_files", return_value=["C:\\picked\\a.mp3"]), \
+             mock.patch.object(main, "_download_file_path", return_value=os.path.join(self.tmp.name, "a.mp3")), \
+             mock.patch.object(main.subprocess, "run"):
+            with open(os.path.join(self.tmp.name, "a.mp3"), "wb") as stream:
+                stream.write(b"audio")
+            self.assertEqual(loopback.post("/api/pick-folder").status_code, 200)
+            self.assertEqual(loopback.post("/api/pick-files").status_code, 200)
+            self.assertEqual(loopback.post("/api/reveal", json={"download_yt_id": "a"}).status_code, 200)
 
     def test_native_os_endpoints_reject_proxied_and_cross_site_requests(self):
-        loopback = TestClient(main.app, client=("127.0.0.1", 43210))
-        loopback.__enter__()
-        try:
-            for headers in (
-                {"X-Forwarded-For": "192.168.1.20"},
-                {"Origin": "https://evil.example"},
-                {"Sec-Fetch-Site": "cross-site"},
-            ):
-                with self.subTest(headers=headers):
-                    self.assertEqual(loopback.post("/api/pick-folder", headers=headers).status_code, 403)
-        finally:
-            loopback.__exit__(None, None, None)
+        loopback = self.loopback_client()
+        for headers in (
+            # Fixture addresses only; no LAN address is hardcoded in shipped code.
+            {"X-Forwarded-For": "192.168.1.20"},
+            {"Origin": "https://evil.example"},
+            {"Sec-Fetch-Site": "cross-site"},
+        ):
+            with self.subTest(headers=headers):
+                self.assertEqual(loopback.post("/api/pick-folder", headers=headers).status_code, 403)
+
+    def test_native_os_endpoints_allow_loopback_origin(self):
+        # A loopback Origin header is the browser's normal case and must pass.
+        loopback = self.loopback_client()
+        with mock.patch.object(main, "_native_pick_folder", return_value="C:\\picked"):
+            for origin in ("http://localhost:5173", "http://127.0.0.1:8000", "http://[::1]:8000"):
+                with self.subTest(origin=origin):
+                    response = loopback.post("/api/pick-folder", headers={"Origin": origin})
+                    self.assertEqual(response.status_code, 200)
 
     def test_cleanup_preview_empty_when_downloads_root_missing_or_file(self):
         original_root = main.REPO_ROOT
@@ -313,8 +333,9 @@ class EndpointTest(ApiTestBase):
         item_id = next(it["id"] for it in self.client.get("/api/workspace").json()["items"]
                        if (it.get("relative_path") or "").endswith("A.mp3"))
         os.remove(os.path.join(main.MP3_FOLDERS[0], "A.mp3"))
-        self.assertEqual(self.client.post("/api/tasks/verify/workspace",
-                                          json={"ids": [item_id]}).status_code, 200)
+        response = self.client.post("/api/tasks/verify/workspace", json={"ids": [item_id]})
+        self.assertEqual(response.status_code, 200)
+        tasks._threads[response.json()["id"]].join(timeout=15)
         ids = [it["id"] for it in self.client.get("/api/workspace").json()["items"]]
         self.assertNotIn(item_id, ids)   # file-only + file gone -> removed by the shared core
 
@@ -1228,8 +1249,6 @@ class BackgroundVerifyTest(ApiTestBase):
         tasks._threads.clear()
 
     def tearDown(self):
-        for t in list(tasks._threads.values()):
-            t.join(timeout=2)
         tasks.DELAY = self._delay
         super().tearDown()
 
@@ -1332,20 +1351,12 @@ class PickFolderTest(unittest.TestCase):
 
 class PickFolderApiTest(ApiTestBase):
     def test_pick_ok(self):
-        orig = main._native_pick_folder
-        main._native_pick_folder = lambda: "E:\\Music"
-        try:
-            self.assertEqual(self.client.post("/api/pick-folder").json()["path"], "E:\\Music")
-        finally:
-            main._native_pick_folder = orig
+        with mock.patch.object(main, "_native_pick_folder", return_value="E:\\Music"):
+            self.assertEqual(self.loopback_client().post("/api/pick-folder").json()["path"], "E:\\Music")
 
     def test_pick_cancelled_409(self):
-        orig = main._native_pick_folder
-        main._native_pick_folder = lambda: None
-        try:
-            self.assertEqual(self.client.post("/api/pick-folder").status_code, 409)
-        finally:
-            main._native_pick_folder = orig
+        with mock.patch.object(main, "_native_pick_folder", return_value=None):
+            self.assertEqual(self.loopback_client().post("/api/pick-folder").status_code, 409)
 
 
 class FindLinkTest(ApiTestBase):
