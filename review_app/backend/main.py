@@ -91,6 +91,7 @@ def _startup():
     folders = settings.configured_mp3_folders()
     _install_catalog(_build_file_catalog(folders))
     print(f"Indexed {len(_CATALOG.records)} local audio files")
+    _recover_jobs()                 # before serving: nothing may write curation state first
 
 
 def _run_path(path):
@@ -730,9 +731,20 @@ def api_workspace_save_to_library(req: WorkspaceIds):
             "saved_link_count": len(links.get("added", [])), "duplicate_link_count": len(links.get("duplicates", []))}
 
 
+# Stopped run states a download can be resumed from ('done' has nothing left to do).
+_RESUMABLE_RUNS = ("interrupted", "failed", "stopped")
+
+
+def _run_public(run):
+    """API shape of a run: options_json stays internal (a replace baseline can be large)."""
+    options = run.pop("options_json", None)
+    run["resumable"] = bool(options) and run["status"] in _RESUMABLE_RUNS
+    return run
+
+
 def _workspace_run_view(run_id):
     try:
-        result = db.get_workspace_run(run_id)
+        result = _run_public(db.get_workspace_run(run_id))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     if result["status"] in ("queued", "running", "finalizing"):
@@ -750,36 +762,47 @@ def _audio_format(fmt):
 
 
 def _start_download_run(items, skipped_ids, fmt, replace):
-    """Shared audio-download run: write an ids file, launch the downloader subprocess with
-    the chosen codec, track a workspace_run. replace=True re-downloads even already-downloaded
-    ids and swaps the old file only on success (downloader writes to .part first, then the app
-    removes the stale old-format file post-success — see _remove_stale_after_replace)."""
+    """Shared audio-download run: snapshot the items into a workspace_run (with the options
+    needed to resume it) and launch the downloader subprocess with the chosen codec.
+    replace=True re-downloads even already-downloaded ids and swaps the old file only on
+    success (downloader writes to .part first, then the app removes the stale old-format
+    file post-success — see _remove_stale_after_replace)."""
     try:
         jobs.reserve_pipeline("workspace_download")
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    try:
+        try:
+            # Replace baseline: each id's files before the run (removed only after success).
+            before = {it["youtube_id"]: _download_stamps(it["youtube_id"]) for it in items} if replace else {}
+            options = {"format": fmt, "replace": replace, "before": before}
+            run_id = db.create_workspace_run("download", None, "workspace-selection", items,
+                                             options=options)
+        except Exception:
+            jobs.release_pipeline("workspace_download")
+            raise
+        _launch_download(run_id, [it["youtube_id"] for it in items], options, force=replace)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    result = _workspace_run_view(run_id)
+    result["skipped_duplicate_item_ids"] = list(skipped_ids)
+    return result
 
-    run_id = None
+
+def _launch_download(run_id, ids, options, force):
+    """Run the downloader over `ids` for an existing run, under an already-held
+    workspace_download lease. On a launch failure the run is marked failed and the lease
+    released before the error propagates. The ids file is per-attempt scratch: SQLite's
+    run snapshot is the source of truth, so a resume rebuilds it."""
     input_path = None
-    launched = False
-    # Snapshot the id's existing download files up front (do NOT delete now — only after success).
-    pre_files = {it["youtube_id"]: set(_download_files_for_id(it["youtube_id"])) for it in items} if replace else {}
     try:
         os.makedirs(RUN_STORAGE, exist_ok=True)
-        run_id = db.create_workspace_run(
-            "download", None, "workspace-selection", items
-        )
         input_path = os.path.join(RUN_STORAGE, f"run-{run_id}-{uuid.uuid4().hex}.ids")
         with open(input_path, "w", encoding="utf-8", newline="") as stream:
-            for item in items:
-                stream.write(item["youtube_id"] + "\n")
-        conn = db.connect()
-        try:
-            conn.execute("UPDATE workspace_runs SET input_path = ? WHERE id = ?",
-                         (input_path, run_id))
-            conn.commit()
-        finally:
-            conn.close()
+            stream.writelines(yt_id + "\n" for yt_id in ids)
+        db.set_workspace_run_input(run_id, input_path)
 
         def finalize(_name):
             try:
@@ -787,9 +810,7 @@ def _start_download_run(items, skipped_ids, fmt, replace):
                 status = "stopped" if outcome["stopped"] else (
                     "done" if outcome["returncode"] == 0 else "failed")
                 error = None if status == "done" else f"downloader exit code {outcome['returncode']}"
-                db.update_workspace_run(run_id, status, error)
-                if replace and status == "done":
-                    _remove_stale_after_replace(pre_files)
+                _settle_download_run(run_id, options, status, error)
             finally:
                 try:
                     os.remove(input_path)
@@ -797,8 +818,8 @@ def _start_download_run(items, skipped_ids, fmt, replace):
                     pass
 
         db.update_workspace_run(run_id, "running")
-        env = {"YT_INPUT_FILE": input_path, "AUDIO_FORMAT": fmt}
-        if replace:
+        env = {"YT_INPUT_FILE": input_path, "AUDIO_FORMAT": options["format"]}
+        if force:
             env["YT_FORCE_REDOWNLOAD"] = "1"
         jobs.start(
             "downloader",
@@ -807,28 +828,50 @@ def _start_download_run(items, skipped_ids, fmt, replace):
             reservation_name="workspace_download",
             run_id=run_id,
         )
-        launched = True
-        result = _workspace_run_view(run_id)
-        result["skipped_duplicate_item_ids"] = list(skipped_ids)
-        return result
     except Exception as e:
-        if run_id is not None:
-            try:
-                db.update_workspace_run(run_id, "failed", str(e))
-            except Exception:
-                pass
-        if input_path and not launched:
+        try:
+            db.update_workspace_run(run_id, "failed", str(e))
+        except Exception:
+            pass
+        if input_path:
             try:
                 os.remove(input_path)
             except OSError:
                 pass
-        if not launched:
-            jobs.release_pipeline("workspace_download")
-        if isinstance(e, (ValueError, KeyError)):
-            raise HTTPException(status_code=400, detail=str(e))
-        if isinstance(e, RuntimeError):
-            raise HTTPException(status_code=409, detail=str(e))
+        jobs.release_pipeline("workspace_download")
         raise
+
+
+def _settle_download_run(run_id, options, status, error=None):
+    db.update_workspace_run(run_id, status, error)
+    if options["replace"] and status == "done":
+        _remove_stale_after_replace(options["before"])
+
+
+def _resume_download_run(run_id):
+    """Continue a stopped download run. The earlier attempt's work is verified on disk
+    first (_download_finished); only ids without a finished file are downloaded again,
+    forced, because the downloader's own log may list an id whose file is partial or gone.
+    KeyError: unknown run. ValueError: not resumable. RuntimeError: pipeline busy."""
+    run = db.get_workspace_run(run_id)
+    options = json.loads(run.get("options_json") or "null")
+    if not options or run["status"] not in _RESUMABLE_RUNS:
+        raise ValueError(f"download run {run_id} is not resumable")
+    jobs.reserve_pipeline("workspace_download")
+    try:
+        index = _download_index()
+        ids = list(dict.fromkeys(it["youtube_id"] for it in run["items"]))
+        remaining = [yt_id for yt_id in ids
+                     if not _download_finished(index.get(yt_id, ()), options["before"].get(yt_id, {}))]
+        if not remaining:        # every file landed; only the bookkeeping died with the process
+            _settle_download_run(run_id, options, "done")
+    except Exception:
+        jobs.release_pipeline("workspace_download")
+        raise
+    if remaining:
+        _launch_download(run_id, remaining, options, force=True)
+    else:
+        jobs.release_pipeline("workspace_download")
 
 
 @app.post("/api/workspace/runs/download")
@@ -863,11 +906,23 @@ def api_download_run(req: DownloadRunReq):
 
 @app.get("/api/workspace/runs")
 def api_workspace_runs():
-    return {"runs": db.list_workspace_runs()}
+    return {"runs": [_run_public(run) for run in db.list_workspace_runs()]}
 
 
 @app.get("/api/workspace/runs/{run_id}")
 def api_workspace_run(run_id: int):
+    return _workspace_run_view(run_id)
+
+
+@app.post("/api/workspace/runs/{run_id}/resume")
+def api_workspace_run_resume(run_id: int):
+    """Continue an interrupted / failed / stopped download run (verified on disk first)."""
+    try:
+        _resume_download_run(run_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=409, detail=str(e))
     return _workspace_run_view(run_id)
 
 
@@ -1027,9 +1082,17 @@ def api_task_verify_library(req: VerifyScope):
         targets = [r for r in linked if r["id"] in wanted]
     else:
         targets = linked if req.scope == "all" else [r for r in linked if not r.get("yt_health")]
-    yt = {r["id"]: r["yt_id"] for r in targets}
+    return _run_task("library-verify", [r["id"] for r in targets])
+
+
+def _build_library_verify(ids):
+    wanted = set(ids)
+    rows, _ = db.get_rows(status="all", limit=1_000_000, offset=0)
+    yt = {r["id"]: r["yt_id"] for r in rows if r["id"] in wanted and r.get("yt_id")}
 
     def do_one(track_id):
+        if track_id not in yt:           # unlinked/removed since the sweep started
+            return False
         try:
             health = _resolve_health(yt[track_id])
         except tasks.NetworkDown:
@@ -1037,11 +1100,7 @@ def api_task_verify_library(req: VerifyScope):
             raise
         db.set_track_health(track_id, health)
         return health in ("dead", "private")
-
-    try:
-        return tasks.run("library-verify", "Verify labels", list(yt), do_one)
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    return do_one
 
 
 @app.post("/api/tasks/verify/workspace")
@@ -1060,20 +1119,29 @@ def api_task_verify_workspace(req: VerifyScope):
     else:
         targets = items if req.scope == "all" else [
             it for it in items if _item_metadata(it).get("health") in (None, "unknown")]
-    yt = {it["id"]: it["youtube_id"] for it in targets}
-    track_of = {it["id"]: it.get("track_id") for it in targets}
+    return _run_task("workspace-verify", [it["id"] for it in targets])
+
+
+def _build_workspace_verify(ids):
+    items = {it["id"]: it for it in db.list_workspace() if it.get("youtube_id")}
 
     def do_one(item_id):
-        meta = _resolve_yt_metadata(yt[item_id])
+        item = items.get(item_id)
+        if item is None:                 # removed / unlinked since the sweep started
+            return False
+        meta = _resolve_yt_metadata(item["youtube_id"])
         db.set_workspace_metadata(item_id, meta)
         health = meta.get("health", "unknown")
-        db.unreview_track_if_dead(track_of[item_id], health)   # dead link + approved track -> unreviewed
+        db.unreview_track_if_dead(item.get("track_id"), health)   # dead link + approved track -> unreviewed
         if health == "unknown":
             raise tasks.NetworkDown()
         return health in ("dead", "private")
+    return do_one
 
+
+def _run_task(kind, ids):
     try:
-        return tasks.run("workspace-verify", "Verify labels", list(yt), do_one)
+        return tasks.run(kind, ids)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -1086,6 +1154,18 @@ def api_tasks():
 @app.post("/api/tasks/{task_id}/cancel")
 def api_task_cancel(task_id: int):
     return {"ok": tasks.request_cancel(task_id)}
+
+
+@app.post("/api/tasks/{task_id}/resume")
+def api_task_resume(task_id: int):
+    """Continue an interrupted / cancelled / network-stopped sweep at its first unfinished item."""
+    try:
+        task = tasks.resume(task_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if task is None:
+        raise HTTPException(status_code=409, detail="task is not resumable")
+    return task
 
 
 # ── auto link finding (file ↔ YouTube) ──────────────────────────────────────
@@ -1236,20 +1316,38 @@ class FindScope(BaseModel):
     ids: list[PositiveInt] | None = None
 
 
+def _wants_youtube(item):
+    return _item_needs_link(item) and _has_terms(item)
+
+
+def _wants_local(item):
+    return not _item_has_valid_local(item) and _has_terms(item)
+
+
+def _workspace_targets(wants, ids):
+    targets = [it for it in db.list_workspace() if wants(it)]
+    if ids is not None:
+        wanted = set(ids)
+        targets = [it for it in targets if it["id"] in wanted]
+    return [it["id"] for it in targets]
+
+
 @app.post("/api/tasks/find-youtube/workspace")
 def api_task_find_youtube_workspace(req: FindScope):
     """Background: for selected Workspace items with no live YouTube link but something
     to search by (metadata, a downloaded video, or a linked local file), auto-find and
     apply the best-scoring link (paced, cancellable)."""
-    items = db.list_workspace()
-    targets = [it for it in items if _item_needs_link(it) and _has_terms(it)]
-    if req.ids is not None:
-        wanted = set(req.ids)
-        targets = [it for it in targets if it["id"] in wanted]
-    by_id = {it["id"]: it for it in targets}
+    return _run_task("workspace-find-youtube", _workspace_targets(_wants_youtube, req.ids))
+
+
+def _build_find_youtube(ids):
+    items = {it["id"]: it for it in db.list_workspace()}
 
     def do_one(item_id):
-        item = by_id[item_id]
+        item = items.get(item_id)
+        # Re-check need: after a restart the item in flight may already have its link.
+        if item is None or not _wants_youtube(item):
+            return False
         artist, title = _item_terms(item)
         exclude = db.rejected_yt_ids(item["track_id"]) if item.get("track_id") else set()
         best = _best_yt_entry(artist, title, exclude)
@@ -1257,12 +1355,7 @@ def api_task_find_youtube_workspace(req: FindScope):
             return False
         db.set_workspace_youtube(item_id, best["id"], _entry_meta(best))
         return True
-
-    try:
-        return tasks.run("workspace-find-youtube", "Find YouTube links",
-                         list(by_id), do_one, delay=settings.task_delay(), noun="found")
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    return do_one
 
 
 @app.post("/api/tasks/find-local/workspace")
@@ -1270,27 +1363,23 @@ def api_task_find_local_workspace(req: FindScope):
     """Background: for selected Workspace items whose local file is missing (never had
     one, or it was moved/renamed/deleted) but that carry something to search by, auto-link
     the best name-matching catalog file. Local-only (no network pacing)."""
+    return _run_task("workspace-find-local", _workspace_targets(_wants_local, req.ids))
+
+
+def _build_find_local(ids):
     _refresh_catalog()   # see files added since startup before matching
-    items = db.list_workspace()
-    targets = [it for it in items if not _item_has_valid_local(it) and _has_terms(it)]
-    if req.ids is not None:
-        wanted = set(req.ids)
-        targets = [it for it in targets if it["id"] in wanted]
-    by_id = {it["id"]: it for it in targets}
+    items = {it["id"]: it for it in db.list_workspace()}
 
     def do_one(item_id):
-        artist, title = _item_terms(by_id[item_id])
-        rec = _best_local_record(artist, title)
+        item = items.get(item_id)
+        if item is None or not _wants_local(item):
+            return False
+        rec = _best_local_record(*_item_terms(item))
         if rec is None:
             return False
         db.set_workspace_file(item_id, rec["folder_identity"], rec["relative_path"])
         return True
-
-    try:
-        return tasks.run("workspace-find-local", "Find local files",
-                         list(by_id), do_one, delay=(0, 0), noun="found")
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    return do_one
 
 
 # ── Lyrics + metadata finding (LRCLIB/community providers + MusicBrainz) ──────
@@ -1631,21 +1720,15 @@ def api_romanize(req: RomanizeReq):
 def api_task_find_lyrics_workspace(req: FindScope):
     """Background: fetch + store lyrics for selected Workspace items missing them
     (paced, cancellable). Items that already have stored lyrics are skipped."""
-    items = db.list_workspace()
-    targets = [it for it in items if _has_terms(it) and not _item_metadata(it).get("lyrics")]
-    if req.ids is not None:
-        wanted = set(req.ids)
-        targets = [it for it in targets if it["id"] in wanted]
-    ids = [it["id"] for it in targets]
+    return _run_task("workspace-find-lyrics", _workspace_targets(
+        lambda it: _has_terms(it) and not _item_metadata(it).get("lyrics"), req.ids))
 
-    def do_one(item_id):   # ponytail: re-lists workspace per item (O(n²)); fine, sweep is paced
-        return _entity_lyrics_get("workspace", item_id, force=False)["found"]
 
-    try:
-        return tasks.run("workspace-find-lyrics", "Find lyrics", ids, do_one,
-                         delay=settings.task_delay(), noun="found")
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+def _build_find_lyrics(ids):
+    # Stored lyrics win (force=False), so re-running the item in flight at a restart
+    # reads back what it already saved instead of fetching again.
+    # ponytail: re-lists workspace per item (O(n²)); fine, sweep is paced
+    return lambda item_id: _entity_lyrics_get("workspace", item_id, force=False)["found"]
 
 
 @app.post("/api/tasks/find-metadata/workspace")
@@ -1653,21 +1736,25 @@ def api_task_find_metadata_workspace(req: FindScope):
     """Background: for selected Workspace items with something to search by, auto-apply
     the best confident MusicBrainz artist/title (paced, cancellable). Overwrites
     title/channel above the score floor — reversible via Info edit."""
-    items = db.list_workspace()
-    targets = [it for it in items if _has_terms(it)]
-    if req.ids is not None:
-        wanted = set(req.ids)
-        targets = [it for it in targets if it["id"] in wanted]
-    ids = [it["id"] for it in targets]
+    return _run_task("workspace-find-metadata", _workspace_targets(_has_terms, req.ids))
 
-    def do_one(item_id):
-        return _entity_apply_metadata("workspace", item_id) is not None
 
-    try:
-        return tasks.run("workspace-find-metadata", "Find metadata", ids, do_one,
-                         delay=settings.task_delay(), noun="updated")
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+def _build_find_metadata(ids):
+    return lambda item_id: _entity_apply_metadata("workspace", item_id) is not None
+
+
+# Every sweep kind, rebuilt from SQLite by the same builder whether freshly started,
+# resumed from Activity, or recovered at startup after the process died mid-sweep.
+tasks.register("library-verify", "Verify labels", _build_library_verify)
+tasks.register("workspace-verify", "Verify labels", _build_workspace_verify)
+tasks.register("workspace-find-youtube", "Find YouTube links", _build_find_youtube,
+               delay=settings.task_delay, noun="found")
+tasks.register("workspace-find-local", "Find local files", _build_find_local,
+               delay=lambda: (0, 0), noun="found")
+tasks.register("workspace-find-lyrics", "Find lyrics", _build_find_lyrics,
+               delay=settings.task_delay, noun="found")
+tasks.register("workspace-find-metadata", "Find metadata", _build_find_metadata,
+               delay=settings.task_delay, noun="updated")
 
 
 # ── interactive search pickers (top-N ranked, user chooses) ──────────────────
@@ -2326,10 +2413,11 @@ def _download_file_path(yt_id):
     return None
 
 
-def _download_files_for_id(yt_id):
-    """Every download-folder file carrying this id (safe/contained). A format change
-    leaves the old + new file side by side, so replace needs the full set, not just one."""
-    out = []
+def _download_index():
+    """{yt_id: [path, ...]} of every safe/contained download-folder file carrying an id,
+    from ONE directory listing (a resume verifies thousands of ids against it). A format
+    change leaves the old + new file side by side, so each id maps to the full set."""
+    out = {}
     try:
         root = _safe_download_root()
     except HTTPException:
@@ -2341,22 +2429,67 @@ def _download_files_for_id(yt_id):
     except OSError:
         return out
     for name in names:
-        if _download_id(name) != yt_id:
+        yt_id = _download_id(name)
+        if not yt_id:
             continue
         path = os.path.normpath(os.path.join(root, name))
         try:
             if os.path.commonpath((root, path)) == root and not _is_reparse_point(path) and os.path.isfile(path):
-                out.append(path)
+                out.setdefault(yt_id, []).append(path)
         except (OSError, ValueError):
             pass
     return out
 
 
+def _download_files_for_id(yt_id):
+    return _download_index().get(yt_id, [])
+
+
+def _download_stamps(yt_id):
+    """{path: mtime_ns} of the id's download files — a replace run's pre-run baseline."""
+    out = {}
+    for path in _download_files_for_id(yt_id):
+        try:
+            out[path] = os.stat(path).st_mtime_ns
+        except OSError:
+            pass
+    return out
+
+
+# What yt-dlp leaves behind mid-download: partial/fragment files, its resume metadata,
+# the pre-conversion source container, and the thumbnail it deletes once embedded.
+_DOWNLOAD_LEFTOVER_EXTS = (".part", ".ytdl", ".webm", ".mp4", ".mkv", ".webp", ".jpg", ".png")
+
+
+def _download_finished(paths, before):
+    """Verify one id's download on disk. Finished = a non-empty audio file that is new or
+    rewritten relative to `before` ({path: mtime_ns}; {} = any audio counts) and no
+    in-progress leftovers — yt-dlp removes those only after its last post-processor, so
+    one surviving means the process died mid-download/convert/tag.
+    ponytail: an .m4a *source* beside a truncated target reads as audio, not a leftover;
+    YouTube's bestaudio is normally .webm, so add a per-format source check if that bites."""
+    finished = False
+    for path in paths:
+        name = os.path.basename(path).lower()
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return False
+        if (stat.st_size == 0 or name.endswith(_DOWNLOAD_LEFTOVER_EXTS)
+                or ".part-frag" in name or ".temp." in name):
+            return False
+        if os.path.splitext(name)[1] in _AUDIO_MEDIA_TYPES and before.get(path) != stat.st_mtime_ns:
+            finished = True
+    return finished
+
+
 def _remove_stale_after_replace(pre_files):
     """After a successful replace-download, drop each id's pre-run files ONLY if a genuinely
     new file landed (e.g. codec changed opus->mp3). Same-name overwrite or a failed id keeps
-    its old file — so a failed download never loses the previous copy."""
+    its old file — so a failed download never loses the previous copy. `pre_files` maps
+    id -> the pre-run paths (a set, or the {path: mtime} baseline)."""
     for yt_id, old in pre_files.items():
+        old = set(old)
         if set(_download_files_for_id(yt_id)) - old:
             for path in old:
                 if os.path.isfile(path):
@@ -3136,6 +3269,79 @@ def _finalize_pipeline(name):
     db.export_matches()
 
 
+def _salvage_pipeline(name):
+    """Resume-time prepare for a curation script the previous process died in. Its lease
+    was held from prepare until the crash, so matches.csv = the DB export plus whatever
+    the script checkpointed: import that progress first (sync validates the file), or the
+    fresh export would overwrite it and the script would redo it. An unreadable/torn CSV
+    fails sync and the export replaces it with the SQLite copy; the script redoes that part."""
+    if name in jobs.CURATION_WRITERS:
+        try:
+            db.sync_matches_csv()
+        except Exception as e:
+            print(f"[recovery] {name}: discarding unreadable matches.csv checkpoint ({e})")
+    _prepare_pipeline(name)
+
+
+def _start_script(name, args=None, resume=False):
+    """Launch a pipeline script, journaled in SQLite from launch until it finalizes, so a
+    process that dies mid-run leaves a row _recover_scripts continues. The scripts keep
+    their own checkpoints (downloaded_ids.txt, matches.csv), so a re-launch continues."""
+    curation = name in jobs.CURATION_READERS or name in jobs.CURATION_WRITERS
+
+    def prepare(n):
+        db.journal_pipeline(n, args)      # inside the reservation: a 409 never touches it
+        try:
+            if curation:
+                (_salvage_pipeline if resume else _prepare_pipeline)(n)
+        except Exception:
+            db.clear_pipeline_journal(n)  # jobs skips finalize after a failed prepare
+            raise
+
+    def finalize(n):
+        try:
+            if curation:
+                _finalize_pipeline(n)
+        finally:
+            db.clear_pipeline_journal(n)
+
+    return jobs.start(name, args=args, prepare=prepare, finalize=finalize, curation=curation)
+
+
+def _recover_scripts():
+    for name, args in db.pipeline_journal():
+        spec = jobs.SCRIPTS.get(name)
+        if spec is None or spec[2]:
+            # Destructive scripts only ever run on a fresh typed confirmation.
+            db.clear_pipeline_journal(name)
+            if spec is not None:
+                jobs.mark_interrupted(name, "[recovery] app restarted mid-run; run it again to continue")
+            continue
+        _start_script(name, args, resume=True)
+
+
+def _recover_download_runs():
+    for run in reversed(db.list_workspace_runs()):      # oldest first
+        if run["status"] == "interrupted" and run.get("options_json"):
+            _resume_download_run(run["id"])
+            return
+
+
+def _recover_jobs():
+    """Continue whatever the previous process died in the middle of. init_db already marked
+    orphaned runs/tasks 'interrupted'; everything needed to resume lives in SQLite (task id
+    lists, run snapshots + options, the script journal), so this works from a clean process
+    with no scratch files. Each job verifies the interrupted work before continuing. A
+    failure is logged, never fatal: the job stays resumable by hand."""
+    for label, recover in (("pipeline script", _recover_scripts),
+                           ("download run", _recover_download_runs),
+                           ("background task", tasks.recover)):
+        try:
+            recover()
+        except Exception as e:
+            print(f"[recovery] {label} not resumed: {e}")
+
+
 @app.get("/api/scripts")
 def api_scripts():
     return jobs.catalog()
@@ -3153,14 +3359,7 @@ def api_script_run(name: str, body: JobIn | None = None):
     if name == "cleanup_downloads":
         raise HTTPException(status_code=409, detail="use cleanup-downloads preview and confirmation endpoint")
     try:
-        curation = name in jobs.CURATION_READERS or name in jobs.CURATION_WRITERS
-        return jobs.start(
-            name,
-            args=(body.args if body else None),
-            prepare=_prepare_pipeline if curation else None,
-            finalize=_finalize_pipeline if curation else None,
-            curation=curation,
-        )
+        return _start_script(name, args=(body.args if body else None))
     except KeyError:
         raise HTTPException(status_code=404, detail="unknown script")
     except RuntimeError as e:

@@ -1,6 +1,7 @@
 <script setup>
 // Activity log: background tasks (verify sweeps — running with progress + cancel,
-// or finished with a result) and the append-only approve/reject decision history.
+// finished with a result, or stopped and resumable) and the append-only approve/reject
+// decision history.
 import { ref, onMounted, onUnmounted } from 'vue'
 import { api } from './api'
 import { activeTab } from './nav'
@@ -9,6 +10,7 @@ const sub = ref('tasks')
 const tasks = ref([])
 const history = ref([])
 const cancelling = ref(null)
+const resuming = ref(null)
 const error = ref('')
 
 const KIND = {
@@ -47,6 +49,12 @@ async function cancel(t) {
   try { await api.taskCancel(t.id) } catch (e) { error.value = String(e) }
   finally { cancelling.value = null; loadTasks() }
 }
+// Interrupted (restart), cancelled, or network-stopped: continue at the first unfinished item.
+async function resume(t) {
+  resuming.value = t.id
+  try { await api.taskResume(t.id) } catch (e) { error.value = String(e) }
+  finally { resuming.value = null; loadTasks() }
+}
 
 let poll = null
 onMounted(() => {
@@ -81,6 +89,8 @@ onUnmounted(() => clearInterval(poll))
                 <v-chip size="x-small" :color="statusColor(t.status)" variant="tonal" class="mr-2">{{ t.status }}</v-chip>
                 <v-btn v-if="t.status === 'running'" icon="mdi-close-circle-outline" size="small" variant="text" color="error"
                   aria-label="Cancel task" :loading="cancelling === t.id" @click="cancel(t)" />
+                <v-btn v-else-if="t.resumable" icon="mdi-play-circle-outline" size="small" variant="text" color="primary"
+                  aria-label="Resume task" :loading="resuming === t.id" @click="resume(t)" />
               </template>
             </v-list-item>
             <v-progress-linear v-if="t.status === 'running'" :model-value="pct(t)" color="primary" height="2" />

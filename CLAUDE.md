@@ -91,13 +91,35 @@ were merged into Library.
   workspace-linked) obeys it. Workspace's on-load enrich
   (`/api/workspace/enrich`) stays a separate capped foreground loop.
 - **Activity** shows the log: **Background tasks** (running with progress +
-  cancel, finished with result; persisted in `background_tasks`, orphaned-running
-  → `interrupted` on restart) and **Decision history** (the append-only
-  `decisions` log, read-only). Task rows carry per-outcome tallies
-  (`ok`/`failed`/`skipped` alongside `done`/`total`/`found`); the worker bumps
-  exactly one per item (success / raised / NetworkDown) and the finish message
-  reads `N noun · O ok, F failed, S skipped`. `VerifyScopeDialog.vue` is the
-  shared scope chooser.
+  cancel, finished with result, or stopped with **Resume**; persisted in
+  `background_tasks`, orphaned-running → `interrupted` on restart) and **Decision
+  history** (the append-only `decisions` log, read-only). Task rows carry
+  per-outcome tallies (`ok`/`failed`/`skipped` alongside `done`/`total`/`found`);
+  the worker bumps exactly one per item (success / raised / NetworkDown) and the
+  finish message reads `N noun · O ok, F failed, S skipped`.
+  `VerifyScopeDialog.vue` is the shared scope chooser.
+- **Every job is resumable and recovers from SQLite alone** (scratch files may be
+  gone). On startup `_recover_jobs` continues whatever the dead process was
+  running (`interrupted`); cancelled/failed/stopped/network-stopped ones resume by
+  hand (`POST /api/tasks/{id}/resume`, `POST /api/workspace/runs/{id}/resume`,
+  Resume buttons in Activity + `DownloadRunAlert`). Each resume verifies the
+  interrupted work first:
+  - **Tasks** store their ordered id list (`ids_json`); `done`, bumped after each
+    item's own write, is the cursor, so the in-flight item is re-run. Kinds are
+    registered once (`tasks.register(kind, title, build)`); `build(ids)` rebuilds
+    `do_one` from current DB state and re-checks need, so `do_one` must be
+    idempotent. The network cutoff un-counts its failing streak so Resume retries it.
+  - **Download runs** keep `options_json` (format, replace, pre-run file baseline).
+    Resume checks every id on disk (`_download_finished`: non-empty audio, new or
+    rewritten vs the baseline, no yt-dlp leftovers `.part`/`.ytdl`/source
+    container/thumbnail/`.temp.`) and force-downloads only the rest.
+  - **Pipeline scripts** are journaled (`pipeline_journal`) from launch to finalize.
+    A curation writer's pre-crash `matches.csv` checkpoint is synced into SQLite
+    (`_salvage_pipeline`) before the re-export; destructive scripts are never
+    relaunched (shown `interrupted`, re-run needs the typed confirmation).
+  - Script children run under `jobs._RUNNER`: a stdin-EOF watchdog kills the
+    child's process group when the app dies, so no orphan keeps writing files
+    while the recovered app resumes the same run.
 - **Labels** (`labels.js` + `LabelRow.vue`, shared by Workspace, Library, and
   Import) are clickable icon badges and the row's ONLY action hub (no 3-dots):
   YouTube, Local file, Downloaded, Untracked, Confirmed, Rejected, plus

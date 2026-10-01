@@ -780,6 +780,116 @@ class WorkspaceApiTest(ApiTestBase):
             storage.cleanup()
 
 
+class RecoveryApiTest(ApiTestBase):
+    """Crash recovery: a fresh process (init_db + _recover_jobs, no scratch files) must
+    verify what the interrupted job already did and continue only the rest."""
+
+    def setUp(self):
+        super().setUp()
+        self.downloads = os.path.join(self.tmp.name, "downloads")
+        os.makedirs(self.downloads)
+        self.storage = tempfile.TemporaryDirectory()
+        self.captured = []
+        patches = [
+            mock.patch.object(main, "RUN_STORAGE", self.storage.name),
+            mock.patch.object(main, "_safe_download_root", return_value=self.downloads),
+            mock.patch.object(jobs, "start", side_effect=lambda name, **kw: (
+                self.captured.append((name, kw)), {"name": name, "status": "running"})[1]),
+            mock.patch.object(jobs, "finalization_result",
+                              return_value={"returncode": 0, "stopped": False}),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self.storage.cleanup)
+        self.addCleanup(jobs.release_pipeline, "workspace_download")
+
+    def touch(self, name, data=b"audio"):
+        path = os.path.join(self.downloads, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def crashed_run(self, ids, **options):
+        items = [{"youtube_id": i, "youtube_url": f"https://www.youtube.com/watch?v={i}"} for i in ids]
+        run_id = db.create_workspace_run("download", None, "test", items,
+                                         options={"format": "opus", "replace": False, "before": {}, **options})
+        db.update_workspace_run(run_id, "running")
+        db.init_db()                     # restart: the run is now 'interrupted'
+        return run_id
+
+    def test_restart_redownloads_only_ids_not_finished_on_disk(self):
+        self.touch("A [done1234567].opus")
+        self.touch("B [part1234567].webm.part")               # died mid-download
+        self.touch("C [tagd1234567].opus")
+        self.touch("C [tagd1234567].webp")                    # died before thumbnail embed/cleanup
+        self.touch("D [zero1234567].opus", b"")               # zero-byte output
+        run_id = self.crashed_run(["done1234567", "part1234567", "tagd1234567",
+                                   "zero1234567", "none1234567"])
+        main._recover_jobs()
+        [(name, kw)] = self.captured
+        self.assertEqual((name, kw["run_id"]), ("downloader", run_id))
+        self.assertEqual(kw["env_overrides"]["YT_FORCE_REDOWNLOAD"], "1")   # log may list a partial id
+        with open(kw["env_overrides"]["YT_INPUT_FILE"], encoding="utf-8") as f:
+            self.assertEqual(f.read().split(), ["part1234567", "tagd1234567", "zero1234567", "none1234567"])
+        self.assertEqual(self.client.get(f"/api/workspace/runs/{run_id}").json()["status"], "running")
+        kw["finalize"]("downloader")
+        self.assertEqual(self.client.get(f"/api/workspace/runs/{run_id}").json()["status"], "done")
+
+    def test_run_that_finished_before_crash_settles_without_relaunch(self):
+        old = self.touch("S [repl1234567].opus")
+        before = {"repl1234567": {old: os.stat(old).st_mtime_ns}}
+        self.touch("S [repl1234567].mp3")                      # replacement landed, cleanup didn't
+        run_id = self.crashed_run(["repl1234567"], format="mp3", replace=True, before=before)
+        main._recover_jobs()
+        self.assertEqual(self.captured, [])
+        run = self.client.get(f"/api/workspace/runs/{run_id}").json()
+        self.assertEqual((run["status"], run["resumable"]), ("done", False))
+        self.assertFalse(os.path.exists(old))                  # stale pre-replace file dropped
+        self.assertEqual(self.client.post(f"/api/workspace/runs/{run_id}/resume").status_code, 409)
+
+    def test_replace_run_redoes_an_id_whose_file_was_not_rewritten(self):
+        old = self.touch("S [same1234567].opus")
+        run_id = self.crashed_run(["same1234567"], replace=True,
+                                  before={"same1234567": {old: os.stat(old).st_mtime_ns}})
+        main._recover_jobs()
+        [(_, kw)] = self.captured
+        with open(kw["env_overrides"]["YT_INPUT_FILE"], encoding="utf-8") as f:
+            self.assertEqual(f.read().split(), ["same1234567"])
+        self.assertTrue(os.path.exists(old))                   # never deleted before success
+
+    def test_failed_run_resumes_from_its_alert(self):
+        run_id = self.crashed_run(["none1234567"])
+        db.update_workspace_run(run_id, "failed", "downloader exit code 1")
+        self.assertTrue(self.client.get("/api/workspace/runs").json()["runs"][0]["resumable"])
+        response = self.client.post(f"/api/workspace/runs/{run_id}/resume")
+        self.assertEqual(response.json()["status"], "running")
+        self.assertEqual(len(self.captured), 1)
+
+    def test_restart_salvages_curation_writer_checkpoint_before_reexport(self):
+        db.journal_pipeline("searcher", [])
+        rows = pd.read_csv(db.MATCHES_CSV)
+        progress = pd.concat([rows, pd.DataFrame([{"filename": "C.mp3", "yt_id": "c"}])])
+        progress.to_csv(db.MATCHES_CSV, index=False)           # the script's pre-crash checkpoint
+        main._recover_jobs()
+        [(name, kw)] = self.captured
+        self.assertEqual(name, "searcher")
+        kw["prepare"](name)
+        filenames = {r["filename"] for r in self.client.get("/api/rows?status=all").json()["rows"]}
+        self.assertIn("C.mp3", filenames)                      # imported, not clobbered by export
+        self.assertIn("C.mp3", set(pd.read_csv(db.MATCHES_CSV)["filename"]))
+        kw["finalize"](name)
+        self.assertEqual(db.pipeline_journal(), [])
+
+    def test_restart_never_relaunches_a_destructive_script(self):
+        db.journal_pipeline("cleanup_tracked", [])
+        self.addCleanup(jobs._jobs.pop, "cleanup_tracked", None)
+        main._recover_jobs()
+        self.assertEqual(self.captured, [])
+        self.assertEqual(db.pipeline_journal(), [])
+        self.assertEqual(jobs.state("cleanup_tracked")["status"], "interrupted")
+
+
 class CurationLeaseApiTest(ApiTestBase):
     def setUp(self):
         super().setUp()

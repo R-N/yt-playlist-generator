@@ -65,7 +65,7 @@ const { preview, fileInfo, ytAction, fileAction, statusAction } = useRowActions(
 // Single-item download (YouTube-label button) + file deletes, both shared (curation.js).
 // Download finish → light refreshItems (not full load): only the downloaded/health labels
 // changed, so skip the runs refetch + on-load verify loop that make load() a jarring reload.
-const { fmtDialog: dlFmt, dlRun, askDownload, chooseFormat, dismissRun: dismissDlRun } = useAudioDownload({
+const { fmtDialog: dlFmt, dlRun, askDownload, chooseFormat, dismissRun: dismissDlRun, resuming: dlResuming, resumeRun, resumeDlRun } = useAudioDownload({
   onError: (e) => { error.value = String(e) }, onNotice: (m) => { notice.value = m },
   reload: refreshItems,
 })
@@ -158,11 +158,16 @@ const listRows = computed(() => pagedItems.value.map((item) => ({
 })))
 
 // Which finished run the user dismissed, so it doesn't resurface every reload.
-// Active runs always show; only a done/failed one can be dismissed.
+// Active runs always show; only a finished one (done/failed/stopped/interrupted) can be dismissed.
 const DISMISS_KEY = 'ws-dismissed-run'
 function dismissRun() {
   if (run.value?.id != null) localStorage.setItem(DISMISS_KEY, String(run.value.id))
   run.value = null
+}
+// The bulk run's poll (onMounted) picks it up again once it's back to running.
+async function resumeBulkRun() {
+  const next = await resumeRun(run.value)
+  if (next) run.value = next
 }
 async function load() {
   loading.value = true
@@ -404,11 +409,8 @@ onUnmounted(() => clearInterval(poll))
     <v-chip color="primary" variant="tonal">{{ items.length }} items · {{ selected.length }} selected</v-chip>
   </div>
 
-  <v-alert v-if="run" variant="tonal" :type="run.status === 'done' ? 'success' : run.status === 'failed' ? 'error' : 'info'" class="mb-4" role="status"
-    :closable="run.status === 'done' || run.status === 'failed'" @click:close="dismissRun">
-    Audio download: <strong>{{ run.status }}</strong>. {{ run.error_text || `${run.items?.length || 0} snapshotted items` }}
-  </v-alert>
-  <DownloadRunAlert :run="dlRun" @dismiss="dismissDlRun" />
+  <DownloadRunAlert :run="run" :resuming="dlResuming" @dismiss="dismissRun" @resume="resumeBulkRun" />
+  <DownloadRunAlert :run="dlRun" :resuming="dlResuming" @dismiss="dismissDlRun" @resume="resumeDlRun" />
   <v-alert v-if="batchDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Playlist', batchDuplicates) }}</v-alert>
   <v-alert v-if="exportDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Download', exportDuplicates) }}</v-alert>
   <v-alert v-if="runDuplicates" type="warning" variant="tonal" class="mb-4">{{ duplicateMessage('Audio download', runDuplicates) }}</v-alert>

@@ -229,12 +229,14 @@ export function useForceSet({ onError = () => {}, reload = async () => {} } = {}
 
 // Shared audio-download flow for every download button (bulk + YouTube-label single).
 // Opens the format modal, starts a download run (yt-ids, replace-on-success), polls it to
-// completion, exposes a dismissable run for DownloadRunAlert, and reloads on finish so the
-// Downloaded label appears. Used by Library/Review/Workspace (yt-label). Workspace's *bulk*
-// download keeps its own richer run alert but reuses FormatDialog.
+// completion, exposes a dismissable/resumable run for DownloadRunAlert, and reloads on
+// finish so the Downloaded label appears. Used by Library/Review/Workspace (yt-label).
+// Workspace's *bulk* run keeps its own durable run state but reuses FormatDialog, the alert,
+// and resumeRun.
 export function useAudioDownload({ onError = () => {}, onNotice = () => {}, reload = async () => {} } = {}) {
   const fmtDialog = ref({ open: false, ytIds: [], replace: true, busy: false })
   const dlRun = ref(null)
+  const resuming = ref(false)
   let poll = null
   const stopPoll = () => { if (poll) { clearInterval(poll); poll = null } }
   onScopeDispose(stopPoll)
@@ -269,7 +271,21 @@ export function useAudioDownload({ onError = () => {}, onNotice = () => {}, relo
     }, 1500)
   }
   const dismissRun = () => { stopPoll(); dlRun.value = null }
-  return { fmtDialog, dlRun, askDownload, chooseFormat, dismissRun }
+  // Resume an interrupted/failed/stopped run; returns the now-running run (or null on error).
+  async function resumeRun(run) {
+    resuming.value = true
+    try {
+      const next = await api.workspaceRunResume(run.id)
+      onNotice('Download resumed.')
+      return next
+    } catch (e) { onError(String(e).includes('409') ? 'Another download is running, or this run cannot resume.' : e); return null }
+    finally { resuming.value = false }
+  }
+  async function resumeDlRun() {
+    const next = await resumeRun(dlRun.value)
+    if (next) { dlRun.value = next; startPoll() }
+  }
+  return { fmtDialog, dlRun, askDownload, chooseFormat, dismissRun, resuming, resumeRun, resumeDlRun }
 }
 
 // Shared file-deletion flows, so Library / Workspace / Review can't drift. Two kinds:

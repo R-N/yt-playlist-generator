@@ -183,6 +183,25 @@ class TestJobs(unittest.TestCase):
         self.assertEqual(st["status"], "idle")
         self.assertEqual(st["lines"], [])
 
+    def test_script_runs_as_main_with_args_and_finishes_done(self):
+        with open(os.path.join(self.tmp.name, "job_test.py"), "w", encoding="utf-8") as f:
+            f.write("import sys\nif __name__ == '__main__':\n    print('ok', sys.argv[1:], flush=True)\n")
+        jobs.start("job_test", args=["x"])
+        self.assertTrue(jobs._jobs["job_test"].done.wait(10))
+        st = jobs.state("job_test")
+        self.assertEqual((st["status"], st["returncode"]), ("done", 0))
+        self.assertIn("ok ['x']", st["lines"])
+
+    def test_child_exits_when_the_app_goes_away(self):
+        jobs.start("job_test")
+        job = jobs._jobs["job_test"]
+        for _ in range(500):
+            if "started" in jobs.state("job_test")["lines"]:
+                break
+            time.sleep(.01)
+        job.proc.stdin.close()   # what the OS does to the pipe when the app process dies
+        self.assertTrue(job.proc_exited.wait(5), "orphaned child kept running")
+
     def test_global_reservation_and_stop_completion(self):
         jobs.start("job_test")
         for _ in range(50):

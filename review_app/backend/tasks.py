@@ -9,9 +9,17 @@ row (db.background_tasks) the Activity tab polls — running now, or finished wi
 a result. Only one verify runs at a time (the rate limit is global, per-IP), so
 a second request is refused while one is active.
 
-This module stays generic: the caller passes the id list and a `do_one(id)->bool`
-that does the actual yt-dlp fetch + DB write (those live in main.py). `bool` =
-"flagged" (a dead/private link), surfaced as the task's `found` count.
+Every sweep is resumable. The task row stores its ordered id list, and `done`
+(bumped once per finished item, after that item's own DB write) is the cursor
+into it. A sweep that was interrupted by a restart, cancelled, or stopped by the
+network cutoff continues at its first unfinished item. The item in flight when
+the process died is simply run again, so each `do_one` must be idempotent.
+
+This module stays generic: main.py registers each kind with a `build(ids)` that
+returns `do_one(id)->bool` (the yt-dlp fetch + DB write). `build` derives
+everything from current DB state, so the same call starts a fresh sweep and
+rebuilds one in a new process. `bool` = "flagged" (a dead/private link),
+surfaced as the task's `found` count.
 """
 import random
 import threading
@@ -24,15 +32,30 @@ DELAY = (1.5, 4.0)
 # Consecutive 'unknown' results usually mean the network/yt-dlp is down, not that
 # every link died — stop and let the user resume rather than burn the whole list.
 NETWORK_FAIL_CUTOFF = 8
+# Stopped states a task can be resumed from ('done' has nothing left to do).
+RESUMABLE = ("interrupted", "error", "cancelled")
 
 _lock = threading.Lock()
 _active = None            # task id of the running verify, or None
 _cancel = set()           # task ids asked to cancel
 _threads = {}             # task id -> Thread (tests join on these)
+_kinds = {}               # kind -> (title, build, delay, noun)
+
+
+def register(kind, title, build, delay=None, noun="flagged"):
+    """Declare a sweep kind. `delay` is a zero-arg callable returning (min, max)
+    seconds, read when the sweep starts; None = DELAY. `noun` labels the `found`
+    count in the finished-task message."""
+    _kinds[kind] = (title, build, delay, noun)
+
+
+def resumable(task):
+    return bool(task["status"] in RESUMABLE and task["kind"] in _kinds
+                and task["has_ids"] and task["done"] < task["total"])
 
 
 def snapshot(limit=100):
-    return db.list_tasks(limit)
+    return [dict(t, resumable=resumable(t)) for t in db.list_tasks(limit)]
 
 
 def request_cancel(task_id):
@@ -53,27 +76,64 @@ def active():
         return _active
 
 
-def run(kind, title, ids, do_one, delay=None, noun="flagged"):
-    """Start a background sweep over `ids`. Raises RuntimeError if one is already
-    running. `noun` labels the `found` count in the finished-task message
-    ('flagged' for verify, 'found' for auto link/file finding). Returns the task row."""
-    global _active
+def run(kind, ids):
+    """Start a background sweep of a registered kind over `ids`. Raises RuntimeError
+    if one is already running. Returns the task row."""
+    title = _kinds[kind][0]
+    ids = list(ids)
     with _lock:
         if _active is not None:
             raise RuntimeError("a background task is already running")
-        task_id = db.create_task(kind, title, len(ids))
-        _active = task_id
-    thread = threading.Thread(
-        target=_worker, args=(task_id, list(ids), do_one, delay or DELAY, noun), daemon=True)
-    _threads[task_id] = thread
-    thread.start()
+        task_id = db.create_task(kind, title, ids)
+        _launch(task_id, kind, ids)
     return db.get_task(task_id)
 
 
-def _worker(task_id, ids, do_one, delay, noun="flagged"):
+def resume(task_id):
+    """Continue a stopped sweep at its first unfinished item. Returns the task row,
+    None if it isn't resumable; RuntimeError if another sweep is running."""
+    with _lock:
+        if _active is not None:
+            raise RuntimeError("a background task is already running")
+        task = db.get_task(task_id)
+        if not task or not resumable(task):
+            return None
+        remaining = db.task_ids(task_id)[task["done"]:]
+        db.reopen_task(task_id)
+        _launch(task_id, task["kind"], remaining)
+    return db.get_task(task_id)
+
+
+def recover():
+    """App startup: continue the sweep the previous process died in the middle of
+    (init_db marked it 'interrupted'). One sweep runs at a time, so only the oldest
+    resumable one continues; anything else stays interrupted with a Resume action."""
+    for task in db.interrupted_tasks():
+        if resumable(task):
+            return resume(task["id"])
+    return None
+
+
+def _launch(task_id, kind, ids):
+    """Start the worker thread. Caller holds _lock."""
+    global _active
+    _, build, delay, noun = _kinds[kind]
+    _active = task_id
+    thread = threading.Thread(
+        target=_worker, args=(task_id, ids, build, delay() if delay else DELAY, noun), daemon=True)
+    _threads[task_id] = thread
+    thread.start()
+
+
+def _worker(task_id, ids, build, delay, noun):
     global _active
     fails = 0
     try:
+        try:
+            do_one = build(ids)
+        except Exception as e:
+            db.finish_task(task_id, "error", f"could not start: {e}")
+            return
         for _id in ids:
             if is_cancelled(task_id):
                 break
@@ -85,8 +145,11 @@ def _worker(task_id, ids, do_one, delay, noun="flagged"):
                 fails += 1
                 db.bump_task(task_id, done=1, skipped=1)
                 if fails >= NETWORK_FAIL_CUTOFF:
+                    # Un-count the failing streak: `done` is the resume cursor, so
+                    # Resume retries these items instead of skipping past them.
+                    db.bump_task(task_id, done=-fails, skipped=-fails)
                     db.finish_task(task_id, "error",
-                                   "stopped after repeated network errors — resume later")
+                                   "stopped after repeated network errors — resume to retry")
                     return
                 continue
             except Exception:            # one bad item must not kill the sweep

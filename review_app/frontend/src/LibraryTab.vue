@@ -77,7 +77,7 @@ const { fset, openSetYoutube, pickLocalFile, apply: applyForceSet, setValue: set
 // Single-item download (YouTube-label button) + shared file-delete flows (curation.js).
 // Download finish → light refresh of just the track rows (downloaded label), not the full
 // 4-way load (saved links + local files + workspace).
-const { fmtDialog: dlFmt, dlRun, askDownload, chooseFormat, dismissRun } = useAudioDownload({
+const { fmtDialog: dlFmt, dlRun, askDownload, chooseFormat, dismissRun, resuming: dlResuming, resumeDlRun } = useAudioDownload({
   onError: (e) => { error.value = String(e) }, onNotice: (m) => { notice.value = m }, reload: refreshRows,
 })
 const { deletePreview, deleteBusy, deleteOutcome, audit, downloadConfirm, previewLocal, confirmLocal, askDownloadDelete, confirmDownloadDelete } = useLocalDelete({
@@ -419,7 +419,7 @@ useTabRefresh('library', load)
   </CurationList>
 
   <v-dialog v-model="matchingLink" max-width="620"><v-card v-if="matchingLink"><v-card-title>Match saved link to local track</v-card-title><v-card-text><div class="text-body-2 mb-3">Choose existing Library file. This preserves exact folder identity.</div><v-list lines="two"><v-list-item v-for="file in localFiles.filter((item) => item.tracks.length)" :key="`${file.folder_identity}-${file.relative_path}`" :active="matchFile === file" @click="matchFile = file"><v-list-item-title>{{ fileLabel(file) }}</v-list-item-title><v-list-item-subtitle>{{ file.tracks.map((track) => `${track.artist || ''} ${track.title || track.filename || ''}`).join(', ') }}</v-list-item-subtitle></v-list-item></v-list></v-card-text><v-card-actions><v-spacer /><v-btn variant="text" @click="matchingLink = null">Cancel</v-btn><v-btn color="primary" :disabled="!matchFile" @click="matchSavedLink">Match exact file</v-btn></v-card-actions></v-card></v-dialog>
-  <DownloadRunAlert :run="dlRun" @dismiss="dismissRun" />
+  <DownloadRunAlert :run="dlRun" :resuming="dlResuming" @dismiss="dismissRun" @resume="resumeDlRun" />
   <v-alert v-if="deleteOutcome" type="info" variant="tonal" closable class="mt-3" @click:close="deleteOutcome = ''">{{ deleteOutcome }}</v-alert>
   <TypedConfirmDialog :model-value="!!deletePreview" :title="`Delete ${deletePreview?.targets.length} approved local files?`" :loading="deleteBusy" @update:model-value="(v) => { if (!v) deletePreview = null }" @confirm="confirmLocal">
     <p>This action deletes only selected approved Library files. No arbitrary path can be entered.</p>

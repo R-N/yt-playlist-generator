@@ -117,6 +117,22 @@ def init_db():
         for c in ("ok", "failed", "skipped"):
             if c not in tcols:
                 conn.execute(f"ALTER TABLE background_tasks ADD COLUMN {c} INTEGER NOT NULL DEFAULT 0")
+        # The sweep's ordered id list: `done` is the cursor into it, so a task can
+        # resume at its first unfinished item after a restart/cancel/network stop.
+        if "ids_json" not in tcols:
+            conn.execute("ALTER TABLE background_tasks ADD COLUMN ids_json TEXT")
+        # Download-run options (format, replace, pre-run file baseline) so an
+        # interrupted run can be re-launched from SQLite alone.
+        rcols = {r[1] for r in conn.execute("PRAGMA table_info(workspace_runs)")}
+        if "options_json" not in rcols:
+            conn.execute("ALTER TABLE workspace_runs ADD COLUMN options_json TEXT")
+        # Pipeline scripts in flight (row inserted at launch, deleted once the run
+        # finalizes). A row surviving a restart means the process died mid-job.
+        conn.execute("""CREATE TABLE IF NOT EXISTS pipeline_journal (
+            name TEXT PRIMARY KEY,
+            args_json TEXT NOT NULL DEFAULT '[]',
+            started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
         conn.commit()
 
         conn.execute(
@@ -1044,14 +1060,16 @@ def workspace_selection(ids):
     }
 
 
-def create_workspace_run(operation, input_path, input_reference, items):
+def create_workspace_run(operation, input_path, input_reference, items, options=None):
     conn = connect()
     try:
         with conn:
             cur = conn.execute(
                 "INSERT INTO workspace_runs "
-                "(operation, input_path, input_reference, status) VALUES (?,?,?,'queued')",
-                (operation, input_path, input_reference),
+                "(operation, input_path, input_reference, status, options_json) "
+                "VALUES (?,?,?,'queued',?)",
+                (operation, input_path, input_reference,
+                 None if options is None else json.dumps(options)),
             )
             run_id = cur.lastrowid
             for position, item in enumerate(items):
@@ -1078,13 +1096,23 @@ def update_workspace_run(run_id, status, error_text=None):
                     "error_text=? WHERE id=?", (status, error_text, run_id)
                 )
             elif status == "running":
+                # Also the resume transition (interrupted/failed/stopped -> running).
                 conn.execute(
                     "UPDATE workspace_runs SET status=?, started_at=CURRENT_TIMESTAMP, "
-                    "error_text=? WHERE id=?", (status, error_text, run_id)
+                    "finished_at=NULL, error_text=? WHERE id=?", (status, error_text, run_id)
                 )
             else:
                 conn.execute("UPDATE workspace_runs SET status=?, error_text=? WHERE id=?",
                              (status, error_text, run_id))
+    finally:
+        conn.close()
+
+
+def set_workspace_run_input(run_id, input_path):
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("UPDATE workspace_runs SET input_path = ? WHERE id = ?", (input_path, run_id))
     finally:
         conn.close()
 
@@ -1100,14 +1128,41 @@ def list_workspace_runs():
 
 
 # ── background task log (verify sweeps) ─────────────────────────────────────
-def create_task(kind, title, total):
+# The id list can be thousands of ids, so row reads skip it (the Activity tab polls
+# the log every 2s) and expose only whether it exists; task_ids() fetches it.
+_TASK_COLUMNS = ("id, kind, title, status, total, done, found, ok, failed, skipped, "
+                 "message, started_at, finished_at, ids_json IS NOT NULL AS has_ids")
+
+
+def create_task(kind, title, ids):
+    ids = list(ids)
     conn = connect()
     try:
         with conn:
             cur = conn.execute(
-                "INSERT INTO background_tasks (kind, title, status, total) "
-                "VALUES (?,?, 'running', ?)", (kind, title, total))
+                "INSERT INTO background_tasks (kind, title, status, total, ids_json) "
+                "VALUES (?,?, 'running', ?, ?)", (kind, title, len(ids), json.dumps(ids)))
             return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def task_ids(task_id):
+    conn = connect()
+    try:
+        row = conn.execute("SELECT ids_json FROM background_tasks WHERE id=?", (task_id,)).fetchone()
+    finally:
+        conn.close()
+    return json.loads(row[0]) if row and row[0] else []
+
+
+def reopen_task(task_id):
+    """Resume transition: a stopped task goes back to running, keeping its tallies."""
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("UPDATE background_tasks SET status='running', message=NULL, "
+                         "finished_at=NULL WHERE id=?", (task_id,))
     finally:
         conn.close()
 
@@ -1138,7 +1193,8 @@ def finish_task(task_id, status, message=""):
 def get_task(task_id):
     conn = connect()
     try:
-        row = conn.execute("SELECT * FROM background_tasks WHERE id=?", (task_id,)).fetchone()
+        row = conn.execute(f"SELECT {_TASK_COLUMNS} FROM background_tasks WHERE id=?",
+                           (task_id,)).fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
@@ -1149,8 +1205,49 @@ def list_tasks(limit=100):
     conn = connect()
     try:
         return [dict(row) for row in conn.execute(
-            "SELECT * FROM background_tasks "
+            f"SELECT {_TASK_COLUMNS} FROM background_tasks "
             "ORDER BY (status='running') DESC, id DESC LIMIT ?", (limit,))]
+    finally:
+        conn.close()
+
+
+def interrupted_tasks():
+    """Tasks whose worker died with the previous process, oldest first."""
+    conn = connect()
+    try:
+        return [dict(row) for row in conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM background_tasks "
+            "WHERE status='interrupted' ORDER BY id")]
+    finally:
+        conn.close()
+
+
+# ── pipeline-script journal (crash recovery for jobs.py scripts) ─────────────
+def journal_pipeline(name, args):
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO pipeline_journal (name, args_json) VALUES (?,?)",
+                         (name, json.dumps(list(args or []))))
+    finally:
+        conn.close()
+
+
+def clear_pipeline_journal(name):
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM pipeline_journal WHERE name=?", (name,))
+    finally:
+        conn.close()
+
+
+def pipeline_journal():
+    """[(name, args)] of scripts that were running when the last process died."""
+    conn = connect()
+    try:
+        return [(r["name"], json.loads(r["args_json"])) for r in conn.execute(
+            "SELECT name, args_json FROM pipeline_journal ORDER BY started_at")]
     finally:
         conn.close()
 

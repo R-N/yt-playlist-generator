@@ -30,17 +30,18 @@ address needs no rebuild or re-signed APK.
   local file directly (folder identity + relative path), so link-less files can
   stage without a Library row.
 - **Library** merges tracks, Saved Links, and untracked local files in one
-  filterable list. Exact handoff to Workspace, Verify links (YouTube health),
-  Remove (drops the Library entry + downloaded file), and Review handoff.
+  filterable list. Exact handoff to Workspace, Verify labels (link health +
+  local/download freshness), Remove (drops the Library entry + downloaded file),
+  and Review handoff.
 - **Review** curates exact local-file matches; curation remains SQLite-backed.
   Its menu offers **find another YouTube link** for a track. An **approval
   checklist** (YouTube / Local file / Lyrics / Metadata) records the parts the
   reviewer verified; approve requires **YouTube** checked, and the ticks are
   saved with the decision (shown in Activity's Decision history).
 - **Activity** is the log: **Background tasks** (verify + find sweeps — running
-  with progress + cancel, finished with a result; persisted in
-  `background_tasks`, running rows marked `interrupted` on restart) and
-  **Decision history** (the append-only `decisions` log, read-only).
+  with progress + cancel, finished with a result, or stopped with **Resume**;
+  persisted in `background_tasks`, running rows marked `interrupted` on restart)
+  and **Decision history** (the append-only `decisions` log, read-only).
 - **Settings** validates mp3 folders, sets the separate download folder,
   rescans the catalog, stores credentials, runs failed-download cleanup, and
   tunes the **Link finding** and **Advanced** knobs (below).
@@ -62,6 +63,21 @@ Local file, Downloaded). **A link found dead/private on an approved track sends
 the track back to unreviewed** (the check clears, decision history is kept) — the
 rule lives in `db.set_track_health`, so every verify path obeys it. Track runs in
 Activity (`GET /api/tasks`).
+
+**Resumable jobs.** Every job continues after the app dies mid-run, from SQLite
+alone: startup resumes whatever was running, and cancelled / failed / stopped
+jobs have a **Resume** (Activity rows, the download alert;
+`POST /api/tasks/{id}/resume`, `POST /api/workspace/runs/{id}/resume`). Resume
+verifies the interrupted work first. Sweeps continue at their first unfinished
+item and re-run the one that was in flight (its write may not have landed); a
+network-stopped sweep retries its failing streak. Download runs check each id on
+disk — a finished, non-empty audio file with no yt-dlp leftovers (`.part`,
+`.ytdl`, source container, thumbnail, `.temp.`), and for a replace run one that
+is new or rewritten — and download only the rest. Maintenance scripts relaunch
+from their own checkpoints; a curation writer's `matches.csv` progress is imported
+before the fresh export, and destructive scripts are never relaunched
+automatically. Script subprocesses exit with the app, so nothing orphaned keeps
+writing while the recovered run continues.
 
 **Labels** are shared clickable icon badges (`labels.js` / `LabelRow.vue`) used
 by Workspace, Library, and Import: YouTube, Local file, Downloaded, Untracked,
@@ -152,9 +168,11 @@ everywhere.
 
 - Configured folders require validation. Operations enforce containment.
 - File identity is configured folder plus relative path, not basename.
-- Selected mp3-folder deletion is approved-only. Preview shows exact targets;
-  confirmation requires short-lived token/manifest and typed `DELETE`, then
-  revalidates containment and identity and records an audit.
+- mp3-folder deletion previews exact targets, then requires a short-lived
+  token/manifest and typed `DELETE`, revalidates containment and identity, and
+  records an audit. Library delete is approved-only (by track id); Workspace
+  delete (by item id, the user curates there) is not, but is otherwise identical
+  and skips download-folder and out-of-folder files.
 - Removing a Library entry drops the row + its downloaded file only; mp3-folder
   files are never touched by it. Download-file deletion is the app's own output
   (simple confirm). Reveal/`explorer /select` and the folder picker are

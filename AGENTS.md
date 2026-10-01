@@ -75,10 +75,11 @@ former Local Files and Untracked screens are folded into Library.
   (nullable FK), OR a local file directly (`folder_identity` + `relative_path`).
   At least one identity is required (table CHECK). File-only and link-less items
   are excluded from YouTube-only operations (playlist/export/download/enrich).
-  The row 3-dots menu is exactly Save to Library / Show in library / Remove, with
-  Show in library hidden for file-only items (no `track_id`). A dismissed
-  finished download-run alert is remembered in localStorage so it stops
-  resurfacing on reload; active runs always show.
+  Row actions live on the shared labels (no 3-dots menu); the **In Workspace**
+  label holds Save to library / Show in library / Remove, with Show in library
+  hidden for file-only items (no `track_id`). A dismissed finished download-run
+  alert is remembered in localStorage so it stops resurfacing on reload; active
+  runs always show.
 - **Library** merges tracks, Saved Links, and untracked local files into one
   filterable list (tri-state, Tachiyomi-style label filter incl. `untracked`).
   Exact handoff to Workspace; **Verify labels** (see below); **Remove** deletes
@@ -97,9 +98,21 @@ former Local Files and Untracked screens are folded into Library.
   `db.set_track_health` / `db.unreview_track_if_dead`, so every verify path obeys
   it. The old capped `/api/workspace/enrich` on-load loop remains.
 - **Activity** is the log: **Background tasks** (`background_tasks` table; running
-  → progress + cancel, finished → result; running rows become `interrupted` on
-  restart) and **Decision history** (`decisions`, append-only, read-only). Scope
-  chooser is `VerifyScopeDialog.vue`; the list polls `GET /api/tasks`.
+  → progress + cancel, finished → result, stopped → **Resume**; running rows become
+  `interrupted` on restart) and **Decision history** (`decisions`, append-only,
+  read-only). Scope chooser is `VerifyScopeDialog.vue`; the list polls
+  `GET /api/tasks`.
+- **Every job is resumable** from SQLite alone. Startup (`_recover_jobs`)
+  continues whatever the dead process was running; cancelled/failed/stopped jobs
+  resume by hand (`POST /api/tasks/{id}/resume`,
+  `POST /api/workspace/runs/{id}/resume`). Resume verifies the interrupted work
+  first: tasks re-run their in-flight item (`done` is the cursor into the stored
+  `ids_json`; `do_one` must be idempotent, rebuilt by the kind's registered
+  `build(ids)`); download runs check each id on disk (`_download_finished`) and
+  re-download only unfinished ones; pipeline scripts are journaled
+  (`pipeline_journal`), a curation writer's `matches.csv` checkpoint is synced
+  before re-export, destructive scripts are never relaunched. Script children die
+  with the app (`jobs._RUNNER` stdin-EOF watchdog), so no orphan races a resume.
 - **Review** curates exact matches; curation stays SQLite-backed.
 - **Settings** owns validated mp3-folder config/rescan, the separate **download
   folder**, credentials, and failed-download cleanup.

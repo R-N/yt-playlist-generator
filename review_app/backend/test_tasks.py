@@ -31,24 +31,33 @@ class TasksTestBase(unittest.TestCase):
         tasks._active = None
         tasks._cancel.clear()
         tasks._threads.clear()
+        self._kinds = dict(tasks._kinds)
 
     def tearDown(self):
         for t in list(tasks._threads.values()):
             t.join(timeout=2)
+        tasks._kinds.clear()
+        tasks._kinds.update(self._kinds)
         for k, v in self._orig.items():
             setattr(db, k, v)
         self.tmp.cleanup()
 
-    def run_and_join(self, kind, title, ids, do_one, delay=(0, 0)):
-        task = tasks.run(kind, title, ids, do_one, delay=delay)
+    def start(self, ids, do_one, kind="test-kind", delay=(0, 0)):
+        tasks.register(kind, "v", lambda _ids: do_one, delay=lambda: delay)
+        return tasks.run(kind, ids)
+
+    def join(self, task):
         tasks._threads[task["id"]].join(timeout=3)
         return db.get_task(task["id"])
+
+    def run_and_join(self, ids, do_one):
+        return self.join(self.start(ids, do_one))
 
 
 class TaskCrudTest(TasksTestBase):
     def test_create_bump_finish_and_list_ordering(self):
-        a = db.create_task("k", "first", total=3)
-        b = db.create_task("k", "second", total=5)
+        a = db.create_task("k", "first", [1, 2, 3])
+        b = db.create_task("k", "second", [1, 2, 3, 4, 5])
         db.bump_task(a, done=2, found=1)
         db.finish_task(a, "done", "ok")
         row = db.get_task(a)
@@ -71,7 +80,7 @@ class TaskCrudTest(TasksTestBase):
 class WorkerTest(TasksTestBase):
     def test_sweep_flags_and_finishes(self):
         seen = []
-        result = self.run_and_join("library-verify", "v", [1, 2, 3, 4],
+        result = self.run_and_join([1, 2, 3, 4],
                                    lambda i: seen.append(i) or (i % 2 == 0))
         self.assertEqual(seen, [1, 2, 3, 4])
         self.assertEqual((result["status"], result["done"], result["found"]), ("done", 4, 2))
@@ -82,7 +91,7 @@ class WorkerTest(TasksTestBase):
             if i == 2:
                 raise ValueError("boom")
             return False
-        result = self.run_and_join("k", "v", [1, 2, 3], do_one)
+        result = self.run_and_join([1, 2, 3], do_one)
         self.assertEqual(result["status"], "done")
         self.assertEqual(result["done"], 3)        # all counted, including the raiser
 
@@ -93,7 +102,7 @@ class WorkerTest(TasksTestBase):
             if i == 3:
                 raise tasks.NetworkDown()         # skipped
             return i == 1                          # flagged on 1
-        result = self.run_and_join("k", "v", [1, 2, 3, 4], do_one)
+        result = self.run_and_join([1, 2, 3, 4], do_one)
         self.assertEqual((result["ok"], result["failed"], result["skipped"]), (2, 1, 1))
         self.assertEqual(result["found"], 1)
         self.assertIn("1 failed", result["message"])
@@ -105,7 +114,7 @@ class WorkerTest(TasksTestBase):
         try:
             def do_one(_):
                 raise tasks.NetworkDown()
-            result = self.run_and_join("k", "v", list(range(10)), do_one)
+            result = self.run_and_join(list(range(10)), do_one)
         finally:
             tasks.NETWORK_FAIL_CUTOFF = orig
         self.assertEqual(result["status"], "error")
@@ -127,7 +136,7 @@ class ConcurrencyTest(TasksTestBase):
                 gate.wait(2)
             return False
 
-        task = tasks.run("k", "v", list(range(5)), do_one, delay=(0, 0))
+        task = self.start(list(range(5)), do_one)
         entered.wait(2)
         return task, gate
 
@@ -143,17 +152,60 @@ class ConcurrencyTest(TasksTestBase):
     def test_second_verify_refused_while_one_runs(self):
         task, gate = self._parked_sweep()
         with self.assertRaises(RuntimeError):
-            tasks.run("k", "v2", [1, 2], lambda i: False)
+            tasks.run("test-kind", [1, 2])
         gate.set()
         tasks._threads[task["id"]].join(timeout=3)
         self.assertIsNone(tasks.active())
 
 
-class OrphanTest(TasksTestBase):
+class RecoveryTest(TasksTestBase):
     def test_restart_marks_running_task_interrupted(self):
-        tid = db.create_task("k", "left running", total=9)
+        tid = db.create_task("k", "left running", list(range(9)))
         db.init_db()                                # simulates an app restart
         self.assertEqual(db.get_task(tid)["status"], "interrupted")
+
+    def test_recover_continues_at_first_unfinished_item(self):
+        seen = []
+        tasks.register("test-kind", "v", lambda ids: seen.append, delay=lambda: (0, 0))
+        tid = db.create_task("test-kind", "v", [10, 11, 12, 13, 14])
+        db.bump_task(tid, done=2, ok=2)             # 10, 11 finished; died while on 12
+        db.init_db()                                # restart
+        tasks._threads.clear()
+        self.join(tasks.recover())
+        self.assertEqual(seen, [12, 13, 14])        # the in-flight item is redone, not skipped
+        row = db.get_task(tid)
+        self.assertEqual((row["status"], row["done"], row["ok"]), ("done", 5, 5))
+
+    def test_network_stop_resume_retries_the_failed_streak(self):
+        orig = tasks.NETWORK_FAIL_CUTOFF
+        tasks.NETWORK_FAIL_CUTOFF = 2
+        online = False
+        seen = []
+
+        def do_one(i):
+            seen.append(i)
+            if not online:
+                raise tasks.NetworkDown()
+            return False
+        try:
+            stopped = self.join(self.start([1, 2, 3, 4], do_one))
+        finally:
+            tasks.NETWORK_FAIL_CUTOFF = orig
+        self.assertEqual((stopped["status"], stopped["done"]), ("error", 0))
+        self.assertTrue(tasks.snapshot()[0]["resumable"])
+        online = True
+        seen.clear()
+        row = self.join(tasks.resume(stopped["id"]))
+        self.assertEqual(seen, [1, 2, 3, 4])
+        self.assertEqual((row["status"], row["done"], row["skipped"]), ("done", 4, 0))
+
+    def test_finished_or_unknown_kind_is_not_resumable(self):
+        done = self.run_and_join([1], lambda i: False)
+        self.assertIsNone(tasks.resume(done["id"]))
+        orphan = db.create_task("no-such-kind", "v", [1, 2])
+        db.init_db()
+        self.assertIsNone(tasks.recover())
+        self.assertEqual(db.get_task(orphan)["status"], "interrupted")
 
 
 if __name__ == "__main__":

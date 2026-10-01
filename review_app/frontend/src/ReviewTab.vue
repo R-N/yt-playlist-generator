@@ -157,7 +157,7 @@ const { preview, fileInfo, ytAction, fileAction, statusAction } = useRowActions(
   reload: refreshCurrent,
 })
 // Single-item download (YouTube-label) + file deletes, shared (curation.js).
-const { fmtDialog: dlFmt, dlRun, askDownload, chooseFormat, dismissRun } = useAudioDownload({
+const { fmtDialog: dlFmt, dlRun, askDownload, chooseFormat, dismissRun, resuming: dlResuming, resumeDlRun } = useAudioDownload({
   onError: (e) => { error.value = String(e) }, onNotice: (m) => { notice.value = m }, reload: refreshCurrent,
 })
 const { deletePreview, deleteBusy, deleteOutcome, downloadConfirm, previewLocal, confirmLocal, askDownloadDelete, confirmDownloadDelete } = useLocalDelete({
@@ -385,7 +385,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   <v-alert v-if="error" type="error" closable class="mb-4" @click:close="error=''">{{ error }}</v-alert>
   <v-alert v-if="notice" type="success" variant="tonal" closable class="mb-4" @click:close="notice=''">{{ notice }}</v-alert>
   <v-alert v-if="deleteOutcome" type="info" variant="tonal" closable class="mb-4" @click:close="deleteOutcome=''">{{ deleteOutcome }}</v-alert>
-  <DownloadRunAlert :run="dlRun" @dismiss="dismissRun" />
+  <DownloadRunAlert :run="dlRun" :resuming="dlResuming" @dismiss="dismissRun" @resume="resumeDlRun" />
 
   <div v-if="loading" class="text-center pa-12">
     <v-progress-circular indeterminate color="primary" size="48" />

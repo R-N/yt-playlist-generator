@@ -94,10 +94,13 @@ export const api = {
   downloadRun: (yt_ids, format = 'opus', replace = true) => jpost('/api/download/run', { yt_ids, format, replace }),
   workspaceRun: (id) => jget(`/api/workspace/runs/${id}`),
   workspaceRuns: () => jget('/api/workspace/runs'),
+  // Continue an interrupted/failed/stopped run; the backend re-verifies files on disk first.
+  workspaceRunResume: (id) => jpost(`/api/workspace/runs/${id}/resume`),
 
   // background tasks (verify sweeps) + Activity log
   tasks: () => jget('/api/tasks'),
   taskCancel: (id) => jpost(`/api/tasks/${id}/cancel`),
+  taskResume: (id) => jpost(`/api/tasks/${id}/resume`),
   verifyLibraryTask: (scope, ids = null) => jpost('/api/tasks/verify/library', { scope, ids }),
   verifyWorkspaceTask: (scope, ids = null) => jpost('/api/tasks/verify/workspace', { scope, ids }),
   findYoutubeWorkspaceTask: (ids = null) => jpost('/api/tasks/find-youtube/workspace', { ids }),

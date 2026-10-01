@@ -92,7 +92,7 @@ class _Job:
     def __init__(self, run_id=None):
         self.proc = None
         self.lines = collections.deque(maxlen=4000)
-        self.status = "idle"          # idle | running | stopping | finalizing | done | failed | stopped
+        self.status = "idle"          # idle | running | stopping | finalizing | done | failed | stopped | interrupted
         self.returncode = None
         self.started = None
         self.lock = threading.Lock()
@@ -109,6 +109,31 @@ _active_name = None
 _curation_lease = None
 STOP_GRACE = 1
 FORCE_WAIT = 1
+
+# Child entry point: runs the script unchanged as __main__ (argv, cwd, exit code as with
+# `python script.py`), but it dies with the app. stdin is a pipe the app never writes;
+# when the app process dies (crash, kill, Ctrl+C, reload) the OS closes it and the read
+# ends (EOF on POSIX, BrokenPipeError on Windows). The child then kills its process group
+# on POSIX (yt-dlp's ffmpeg included) or itself on Windows. Otherwise an orphan keeps
+# downloading while the recovered app resumes the same run over its files.
+# Raw os.read, not sys.stdin: a daemon thread parked in the buffered reader holds its lock
+# and aborts the interpreter at a normal exit.
+_RUNNER = (
+    "import os, runpy, signal, sys, threading\n"
+    "def _die_with_parent():\n"
+    "    try:\n"
+    "        while os.read(0, 4096):\n"
+    "            pass\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "    if hasattr(os, 'killpg'):\n"
+    "        os.killpg(os.getpgrp(), signal.SIGKILL)\n"
+    "    os._exit(1)\n"
+    "threading.Thread(target=_die_with_parent, daemon=True).start()\n"
+    "sys.argv = sys.argv[1:]\n"
+    "sys.path[0] = os.path.dirname(os.path.abspath(sys.argv[0]))\n"
+    "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+)
 
 
 def _job(name):
@@ -218,7 +243,7 @@ def start(name, args=None, prepare=None, finalize=None, curation=False,
         job.done.clear()
 
     script_path = os.path.join(REPO_ROOT, SCRIPTS[name][0])
-    argv = [sys.executable, "-u", script_path] + list(args or [])
+    argv = [sys.executable, "-u", "-c", _RUNNER, script_path] + list(args or [])
 
     try:
         if prepare is not None:
@@ -245,6 +270,7 @@ def start(name, args=None, prepare=None, finalize=None, curation=False,
             environment.update(env_overrides or {})
             job.proc = subprocess.Popen(  # type: ignore[call-overload]
                 argv, cwd=REPO_ROOT, env=environment,
+                stdin=subprocess.PIPE,         # parent-death signal, see _RUNNER
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
                 **popen_options,
@@ -318,12 +344,12 @@ def start(name, args=None, prepare=None, finalize=None, curation=False,
             else:
                 with job.lock:
                     job.status = "failed"   # reached only when the child never exited
-            stdout = getattr(job.proc, "stdout", None)
-            if stdout is not None:
-                try:
-                    stdout.close()
-                except Exception:
-                    pass
+            for stream in (getattr(job.proc, "stdout", None), getattr(job.proc, "stdin", None)):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
             with job.lock:
                 job.proc = None
             if exited:
@@ -372,6 +398,14 @@ def stop(name):
         if job.proc_exited.is_set():
             job.done.wait(FORCE_WAIT)
     return state(name)
+
+
+def mark_interrupted(name, message):
+    """Surface a job the previous process died in that recovery chose not to relaunch."""
+    job = _job(name)
+    with job.lock:
+        job.status = "interrupted"
+        job.lines.append(message)
 
 
 def state(name, tail=None):

@@ -52,8 +52,8 @@ can replace the other on a device. Android setup is documented in
   Saved Links require exact local-file matching before Review.
 - **Review** curates exact local-file matches.
 - **Activity** logs background tasks (verify sweeps — running with progress and
-  a cancel, or finished with a result) and the append-only approve/reject
-  decision history.
+  a cancel, finished with a result, or stopped with a Resume) and the
+  append-only approve/reject decision history.
 - **Settings** validates mp3 folders, sets the separate download folder,
   rescans the catalog, stores credentials, and owns failed-download cleanup.
 
@@ -65,6 +65,13 @@ whether to verify **all** links or **only unverified** ones; watch it under
 Activity. Each label also has a per-row verify. **A link found dead on an
 approved track sends the track back to unreviewed** (check clears, decision
 history kept).
+
+**Jobs survive restarts.** If the app stops mid-job (crash, reboot, Ctrl+C), the
+next start picks up where it left off: background tasks continue at their first
+unfinished item, download runs check which files actually finished on disk and
+download only the rest, and maintenance scripts relaunch from their own
+checkpoints. Cancelled, failed, or stopped jobs have a **Resume** button (Activity,
+download alert). Destructive maintenance is never relaunched automatically.
 
 Shared clickable **labels** (YouTube, Local file, Downloaded, Untracked,
 Confirmed, Rejected) appear in Workspace and Library. A **download**
