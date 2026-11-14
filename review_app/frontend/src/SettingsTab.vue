@@ -7,6 +7,8 @@ import ConfirmDialog from './ConfirmDialog.vue'
 
 const state = ref({})
 const form = ref({ DISCORD_BOT_TOKEN: '', DISCORD_CHANNEL_ID: '', ACOUSTID_API_KEY: '' })
+const showToken = ref(false)
+const showAcoustidKey = ref(false)
 const folders = ref([])
 const picking = ref(false)
 const downloadFolder = ref('')
@@ -142,7 +144,7 @@ useTabRefresh('settings', load)
       <div class="text-caption text-medium-emphasis mb-3">Absolute, existing, non-overlapping folders. Pick with the OS dialog or edit inline. Rescan updates Library and Local Files.</div>
       <div v-if="!folders.length" class="text-caption text-medium-emphasis mb-3">No folders configured — local features are off until you add one.</div>
       <div v-for="(folder, index) in folders" :key="index" class="d-flex align-center ga-2 mb-2">
-        <v-text-field v-model="folders[index]" density="compact" variant="outlined" hide-details prepend-inner-icon="mdi-folder-outline" placeholder="C:\\Music" />
+        <v-text-field v-model="folders[index]" density="compact" variant="outlined" persistent-hint hint="Absolute path" prepend-inner-icon="mdi-folder-outline" placeholder="C:\\Music" />
         <v-btn icon="mdi-close" variant="text" size="small" aria-label="Remove folder" @click="removeFolder(index)" />
       </div>
       <div class="d-flex flex-wrap ga-2 mt-3">
@@ -157,7 +159,7 @@ useTabRefresh('settings', load)
       <div class="text-subtitle-1 mb-1">Download folder</div>
       <div class="text-caption text-medium-emphasis mb-3">Where audio downloads are saved. Failed-download cleanup operates on this folder. Absolute, existing. Blank = repo <code>downloads/</code>.</div>
       <div class="d-flex align-center ga-2">
-        <v-text-field v-model="downloadFolder" density="compact" variant="outlined" hide-details prepend-inner-icon="mdi-folder-download-outline" placeholder="E:\\Music\\downloads" />
+        <v-text-field v-model="downloadFolder" density="compact" variant="outlined" persistent-hint hint="Absolute path; blank = repo downloads/" prepend-inner-icon="mdi-folder-download-outline" placeholder="E:\\Music\\downloads" />
         <v-btn variant="tonal" :loading="pickingDownload" prepend-icon="mdi-folder-plus-outline" @click="pickDownloadFolder">Pick</v-btn>
         <v-btn color="primary" :loading="saving" @click="saveDownloadFolder">Save</v-btn>
       </div>
@@ -167,14 +169,14 @@ useTabRefresh('settings', load)
       <div class="text-subtitle-1 mb-1">Link finding</div>
       <div class="text-caption text-medium-emphasis mb-3">Auto find-YouTube / find-local tasks. Top-N = how many search hits to score before picking the best. Delay paces network fetches (seconds, randomized between min and max) to dodge rate limits. Min scores are the lowest match score an auto-find will accept and apply — lower accepts weaker matches (YouTube score may be negative; local is a 0–100 filename ratio).</div>
       <div class="d-flex align-center ga-2 flex-wrap">
-        <v-text-field v-model="linkFinding.YT_SEARCH_TOP_N" type="number" min="1" max="10" density="compact" variant="outlined" hide-details label="Search top-N" placeholder="3" style="min-width:120px" />
-        <v-text-field v-model="linkFinding.TASK_DELAY_MIN" type="number" min="0" step="0.5" density="compact" variant="outlined" hide-details label="Delay min (s)" placeholder="1.5" style="min-width:120px" />
-        <v-text-field v-model="linkFinding.TASK_DELAY_MAX" type="number" min="0" step="0.5" density="compact" variant="outlined" hide-details label="Delay max (s)" placeholder="4" style="min-width:120px" />
-        <v-text-field v-model="linkFinding.YT_MIN_SCORE" type="number" density="compact" variant="outlined" hide-details label="YouTube min score" placeholder="0" style="min-width:120px" />
-        <v-text-field v-model="linkFinding.LOCAL_MIN_SCORE" type="number" min="0" max="100" density="compact" variant="outlined" hide-details label="Local min score" placeholder="60" style="min-width:120px" />
-        <v-text-field v-model="linkFinding.MB_MIN_SCORE" type="number" min="0" max="100" density="compact" variant="outlined" hide-details label="MusicBrainz min score" placeholder="90" style="min-width:120px" />
-        <v-text-field v-model="linkFinding.MB_SEARCH_LIMIT" type="number" min="1" max="25" density="compact" variant="outlined" hide-details label="MusicBrainz candidates" placeholder="5" style="min-width:120px" />
-        <v-text-field v-model="linkFinding.SEARCH_RESULT_LIMIT" type="number" min="1" max="50" density="compact" variant="outlined" hide-details label="Picker results" placeholder="10" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.YT_SEARCH_TOP_N" type="number" min="1" max="10" density="compact" variant="outlined" persistent-hint hint="1–10, default 3" label="Search top-N" placeholder="3" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.TASK_DELAY_MIN" type="number" min="0" step="0.5" density="compact" variant="outlined" persistent-hint hint="seconds, default 1.5" label="Delay min (s)" placeholder="1.5" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.TASK_DELAY_MAX" type="number" min="0" step="0.5" density="compact" variant="outlined" persistent-hint hint="seconds, default 4" label="Delay max (s)" placeholder="4" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.YT_MIN_SCORE" type="number" density="compact" variant="outlined" persistent-hint hint="may be negative, default 0" label="YouTube min score" placeholder="0" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.LOCAL_MIN_SCORE" type="number" min="0" max="100" density="compact" variant="outlined" persistent-hint hint="0–100, default 60" label="Local min score" placeholder="60" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.MB_MIN_SCORE" type="number" min="0" max="100" density="compact" variant="outlined" persistent-hint hint="0–100, default 90" label="MusicBrainz min score" placeholder="90" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.MB_SEARCH_LIMIT" type="number" min="1" max="25" density="compact" variant="outlined" persistent-hint hint="1–25, default 5" label="MusicBrainz candidates" placeholder="5" style="min-width:120px" />
+        <v-text-field v-model="linkFinding.SEARCH_RESULT_LIMIT" type="number" min="1" max="50" density="compact" variant="outlined" persistent-hint hint="1–50, default 10" label="Picker results" placeholder="10" style="min-width:120px" />
         <v-btn color="primary" :loading="saving" @click="saveLinkFinding">Save</v-btn>
       </div>
     </v-card>
@@ -183,13 +185,13 @@ useTabRefresh('settings', load)
       <div class="text-subtitle-1 mb-1">Advanced</div>
       <div class="text-caption text-medium-emphasis mb-3">Delete-token TTL = seconds a delete confirmation stays valid before you must re-preview (min 5). Cleanup extensions = which file suffixes the download cleanup treats as junk (comma-separated; zero-byte files are always swept).</div>
       <div class="d-flex align-center ga-2 flex-wrap">
-        <v-text-field v-model="advanced.DELETE_TOKEN_TTL" type="number" min="5" density="compact" variant="outlined" hide-details label="Delete-token TTL (s)" placeholder="60" style="min-width:160px" />
-        <v-text-field v-model="advanced.CLEANUP_EXTENSIONS" density="compact" variant="outlined" hide-details label="Cleanup extensions" placeholder=".mp4, .webm, .m4a, .part …" style="min-width:280px" />
+        <v-text-field v-model="advanced.DELETE_TOKEN_TTL" type="number" min="5" density="compact" variant="outlined" persistent-hint hint="seconds, min 5, default 60" label="Delete-token TTL (s)" placeholder="60" style="min-width:160px" />
+        <v-text-field v-model="advanced.CLEANUP_EXTENSIONS" density="compact" variant="outlined" persistent-hint hint="comma-separated" label="Cleanup extensions" placeholder=".mp4, .webm, .m4a, .part …" style="min-width:280px" />
         <v-btn color="primary" :loading="saving" @click="saveAdvanced">Save</v-btn>
       </div>
     </v-card>
 
-    <v-card variant="outlined" class="pa-4 mb-5"><div class="text-subtitle-1 mb-1">Credentials</div><div class="text-caption text-medium-emphasis mb-3">Used by Discord harvest and MusicBrainz enrichment jobs.</div><v-text-field v-model="form.DISCORD_BOT_TOKEN" label="Discord bot token" type="password" autocomplete="off" :placeholder="state.DISCORD_BOT_TOKEN?.set ? 'set — leave blank to keep' : 'not set'" /><v-text-field v-model="form.DISCORD_CHANNEL_ID" label="Default Discord channel ID" /><v-text-field v-model="form.ACOUSTID_API_KEY" label="AcoustID API key" type="password" autocomplete="off" :placeholder="state.ACOUSTID_API_KEY?.set ? 'set — leave blank to keep' : 'not set'" /><v-btn color="primary" :loading="saving" @click="save">Save credentials</v-btn><v-alert v-if="saved" type="success" variant="tonal" class="mt-3">Saved.</v-alert></v-card>
+    <v-card variant="outlined" class="pa-4 mb-5"><div class="text-subtitle-1 mb-1">Credentials</div><div class="text-caption text-medium-emphasis mb-3">Used by Discord harvest and MusicBrainz enrichment jobs.</div><v-text-field v-model="form.DISCORD_BOT_TOKEN" label="Discord bot token" :type="showToken ? 'text' : 'password'" :append-inner-icon="showToken ? 'mdi-eye-off' : 'mdi-eye'" @click:append-inner="showToken = !showToken" :placeholder="state.DISCORD_BOT_TOKEN?.set ? 'set — leave blank to keep' : 'not set'" /><v-text-field v-model="form.DISCORD_CHANNEL_ID" label="Default Discord channel ID" /><v-text-field v-model="form.ACOUSTID_API_KEY" label="AcoustID API key" :type="showAcoustidKey ? 'text' : 'password'" :append-inner-icon="showAcoustidKey ? 'mdi-eye-off' : 'mdi-eye'" @click:append-inner="showAcoustidKey = !showAcoustidKey" :placeholder="state.ACOUSTID_API_KEY?.set ? 'set — leave blank to keep' : 'not set'" /><v-btn color="primary" :loading="saving" @click="save">Save credentials</v-btn><v-alert v-if="saved" type="success" variant="tonal" class="mt-3">Saved.</v-alert></v-card>
 
     <v-card variant="outlined" class="pa-4 mb-5"><div class="text-subtitle-1 text-error mb-1">Cleanup downloads</div><div class="text-body-2 text-medium-emphasis mb-3">Preview and remove only failed, partial, or zero-byte files inside the configured downloads folder. This does not run generic Pipeline controls.</div><v-btn color="error" variant="tonal" prepend-icon="mdi-delete-alert" @click="previewCleanup">Preview cleanup</v-btn><v-alert v-if="cleanupResult" variant="tonal" :type="cleanupResult.status === 'done' ? 'success' : 'warning'" class="mt-3">Deleted {{ cleanupResult.deleted }}, rejected {{ cleanupResult.rejected }}.</v-alert></v-card>
 

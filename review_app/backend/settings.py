@@ -213,9 +213,10 @@ def apply_to_environ():
 
 
 def get(key, default=None):
-    """Live env first (covers shell-exported + just-saved), then .env on disk."""
+    """Live env first (covers shell-exported + just-saved), then .env on disk.
+    Matches _env_or_file's convention: None means unset, empty string is a real value."""
     val = os.environ.get(key)
-    if val:
+    if val is not None:
         return val
     return load_env().get(key, default)
 
@@ -242,6 +243,7 @@ def save(values):
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write("\n".join(f"{k}={v}" for k, v in env.items()) + "\n")
+        os.chmod(tmp, 0o600)   # no-op-safe on Windows; .env holds secrets (tokens)
         os.replace(tmp, ENV_PATH)
     except Exception:
         try:

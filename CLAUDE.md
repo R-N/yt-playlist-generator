@@ -60,8 +60,8 @@ were merged into Library.
   absolute path, never copies (files may live outside configured folders,
   referenced in place). One entry point `/api/files/add` with `target`
   `library` (find-or-create track) / `workspace` (file-only item) / `untracked`
-  (Import's in-memory `_STAGED_FILES`, survives refresh not reboot). Picker is
-  localhost-only (`/api/pick-files`). Staged out-of-folder files are first-class
+  (Import's in-memory `_STAGED_FILES`, survives refresh not reboot). Picker and
+  `/api/files/add` are localhost-only (`/api/pick-files`, `_require_loopback`). Staged out-of-folder files are first-class
   (play/reveal/add) via `_untracked_ref`.
 - Workspace item is its own entity (schema v5): carries a YouTube id, a library
   `track_id` (nullable FK), OR a direct file ref (`folder_identity` +
@@ -75,7 +75,10 @@ were merged into Library.
   doesn't resurface on reload; active runs always show.
 - Library merges tracks, Saved Links, and untracked local files in one list.
   Exact handoff to Workspace; Review curation; **Verify labels**; **Remove**
-  (deletes the Library entry + its downloaded file, never the mp3-folder file).
+  (deletes the Library entry + its downloaded file, never the mp3-folder file;
+  its decisions survive with `track_id` NULLed via `ON DELETE SET NULL`; bulk
+  removal of >1 item needs typed `DELETE`). Workspace/Library toolbars collapse
+  secondary actions into a **More** menu on mobile.
   Tri-state (Tachiyomi-style) label filter, `untracked` included.
 - **Verify labels** (Library + Workspace bulk button) re-checks the SELECTED
   items' link health + local/download freshness as a paced background task

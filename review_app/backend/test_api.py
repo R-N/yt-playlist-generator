@@ -122,6 +122,7 @@ class EndpointTest(ApiTestBase):
                 ("/api/pick-folder", {}),
                 ("/api/pick-files", {}),
                 ("/api/reveal", {"download_yt_id": "a"}),
+                ("/api/files/add", {"paths": [], "target": "workspace"}),
             ):
                 with self.subTest(endpoint=endpoint):
                     response = self.client.post(endpoint, json=body)
@@ -138,6 +139,8 @@ class EndpointTest(ApiTestBase):
             self.assertEqual(loopback.post("/api/pick-folder").status_code, 200)
             self.assertEqual(loopback.post("/api/pick-files").status_code, 200)
             self.assertEqual(loopback.post("/api/reveal", json={"download_yt_id": "a"}).status_code, 200)
+            self.assertEqual(loopback.post(
+                "/api/files/add", json={"paths": [], "target": "workspace"}).status_code, 200)
 
     def test_native_os_endpoints_reject_proxied_and_cross_site_requests(self):
         loopback = self.loopback_client()
@@ -315,7 +318,7 @@ class EndpointTest(ApiTestBase):
         outside = os.path.join(tempfile.mkdtemp(), "Elsewhere.mp3")
         with open(outside, "wb") as f:
             f.write(b"\xff\xfb\x90\x00" + b"\x00" * 64)
-        self.assertEqual(self.client.post("/api/files/add", json={
+        self.assertEqual(self.loopback_client().post("/api/files/add", json={
             "paths": [outside], "target": "workspace"}).json()["added"], 1)
         item_id = next(it["id"] for it in self.client.get("/api/workspace").json()["items"]
                        if (it.get("relative_path") or "").endswith("Elsewhere.mp3"))
@@ -1553,6 +1556,10 @@ class EmbedMetadataTest(ApiTestBase):
 
 
 class AddFilesByPathTest(ApiTestBase):
+    def setUp(self):
+        super().setUp()
+        self.loopback = self.loopback_client()   # /api/files/add is loopback-only
+
     def test_add_by_absolute_path_targets_and_staged_untracked(self):
         extra = os.path.join(self.tmp.name, "outside")   # outside configured mp3 folders
         os.makedirs(extra)
@@ -1560,20 +1567,20 @@ class AddFilesByPathTest(ApiTestBase):
         with open(p, "wb") as f:
             f.write(b"ID3")
         # untracked -> in-memory staged, surfaced by /api/files/staged
-        r = self.client.post("/api/files/add", json={"paths": [p], "target": "untracked"}).json()
+        r = self.loopback.post("/api/files/add", json={"paths": [p], "target": "untracked"}).json()
         self.assertEqual(r["added"], 1)
         staged = self.client.get("/api/files/staged").json()["files"]
         self.assertEqual([s["basename"] for s in staged], ["Song.mp3"])
         # library -> becomes a track; staged entry then drops (now tracked)
-        self.assertEqual(self.client.post(
+        self.assertEqual(self.loopback.post(
             "/api/files/add", json={"paths": [p], "target": "library"}).json()["added"], 1)
         self.assertEqual(self.client.get("/api/files/staged").json()["files"], [])
         # re-staging a now-tracked file is refused
-        again = self.client.post("/api/files/add", json={"paths": [p], "target": "untracked"}).json()
+        again = self.loopback.post("/api/files/add", json={"paths": [p], "target": "untracked"}).json()
         self.assertEqual(again["added"], 0)
         self.assertEqual(again["results"][0]["reason"], "already in Library")
         # a path that isn't a file is skipped
-        missing = self.client.post("/api/files/add", json={
+        missing = self.loopback.post("/api/files/add", json={
             "paths": [os.path.join(extra, "nope.mp3")], "target": "workspace"}).json()
         self.assertEqual(missing["added"], 0)
 
@@ -1583,7 +1590,7 @@ class AddFilesByPathTest(ApiTestBase):
         p = os.path.join(extra, "Tune.mp3")
         with open(p, "wb") as f:
             f.write(self.audio_bytes)
-        self.client.post("/api/files/add", json={"paths": [p], "target": "untracked"})
+        self.loopback.post("/api/files/add", json={"paths": [p], "target": "untracked"})
         s = self.client.get("/api/files/staged").json()["files"][0]
         # plays despite living outside the configured folders (explicitly staged)
         audio = self.client.get("/api/local-audio", params={
@@ -1604,7 +1611,7 @@ class AddFilesByPathTest(ApiTestBase):
         p = os.path.join(self.tmp.name, "ws.mp3")
         with open(p, "wb") as f:
             f.write(b"ID3")
-        self.assertEqual(self.client.post(
+        self.assertEqual(self.loopback.post(
             "/api/files/add", json={"paths": [p], "target": "workspace"}).json()["added"], 1)
         items = self.client.get("/api/workspace").json()["items"]
         self.assertTrue(any(it.get("relative_path") == "ws.mp3" for it in items))
@@ -1615,7 +1622,7 @@ class AddFilesByPathTest(ApiTestBase):
         p = os.path.join(main.MP3_FOLDERS[0], "loose.mp3")   # a configured-folder untracked file
         with open(p, "wb") as f:
             f.write(b"ID3")
-        self.client.post("/api/files/add", json={"paths": [p], "target": "workspace"})
+        self.loopback.post("/api/files/add", json={"paths": [p], "target": "workspace"})
         item = next(it for it in self.client.get("/api/workspace").json()["items"]
                     if it.get("relative_path") == "loose.mp3")
         self.assertIsNone(item["track_id"])
@@ -1634,7 +1641,7 @@ class AddFilesByPathTest(ApiTestBase):
         p = os.path.join(main.MP3_FOLDERS[0], "withlink.mp3")
         with open(p, "wb") as f:
             f.write(b"ID3")
-        self.client.post("/api/files/add", json={"paths": [p], "target": "workspace"})
+        self.loopback.post("/api/files/add", json={"paths": [p], "target": "workspace"})
         item = next(it for it in self.client.get("/api/workspace").json()["items"]
                     if it.get("relative_path") == "withlink.mp3")
         self.client.post(f"/api/workspace/{item['id']}/youtube",
@@ -1650,7 +1657,7 @@ class AddFilesByPathTest(ApiTestBase):
         p = os.path.join(main.MP3_FOLDERS[0], "mixed.mp3")
         with open(p, "wb") as f:
             f.write(b"ID3")
-        self.client.post("/api/files/add", json={"paths": [p], "target": "workspace"})
+        self.loopback.post("/api/files/add", json={"paths": [p], "target": "workspace"})
         file_item = next(it for it in self.client.get("/api/workspace").json()["items"]
                          if it.get("relative_path") == "mixed.mp3")
         link_item = self.client.post("/api/workspace/import", json={"text": "zzzzzzzzzzz"}).json()["added"][0]
@@ -1931,7 +1938,7 @@ class RomanizeTest(ApiTestBase):
         with open(p, "wb") as f:
             f.write(self.audio_bytes)
         main._install_catalog(main._build_file_catalog(main.MP3_FOLDERS))
-        self.assertEqual(self.client.post(
+        self.assertEqual(self.loopback_client().post(
             "/api/files/add", json={"paths": [p], "target": "library"}).json()["added"], 1)
         tid = next(row["id"] for row in self.client.get("/api/rows?status=all").json()["rows"]
                    if row["filename"] == "残酷な天使.mp3")

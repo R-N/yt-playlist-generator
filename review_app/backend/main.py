@@ -67,9 +67,10 @@ _AUDIO_MEDIA_TYPES = {
 class FileCatalog:
     records: tuple
     by_basename: Mapping
+    by_ref: Mapping = MappingProxyType({})   # (folder_identity, relative_path) -> record
 
 
-_CATALOG = FileCatalog((), MappingProxyType({}))
+_CATALOG = FileCatalog((), MappingProxyType({}), MappingProxyType({}))
 _decision_count = 0     # since-startup counter for auto-export
 RUN_STORAGE = os.path.join(os.path.dirname(__file__), "workspace_runs")
 _DELETE_TOKENS = {}   # token TTL is Settings-tunable (settings.delete_token_ttl)
@@ -163,9 +164,12 @@ def _build_file_catalog(folders):
                 })
     frozen = tuple(MappingProxyType(record) for record in records)
     index = {}
+    by_ref = {}
     for record in frozen:
         index.setdefault(os.path.normcase(record["basename"]), []).append(record)
-    return FileCatalog(frozen, MappingProxyType({k: tuple(v) for k, v in index.items()}))
+        by_ref[(record["folder_identity"], record["relative_path"])] = record
+    return FileCatalog(frozen, MappingProxyType({k: tuple(v) for k, v in index.items()}),
+                       MappingProxyType(by_ref))
 
 
 def _is_reparse_point(path):
@@ -397,14 +401,21 @@ def _record_for_track(track_id):
     if not links:
         return None
     row = links[0]
-    return next((r for r in _CATALOG.records
-                 if r["folder_identity"] == row["folder_identity"] and
-                 r["relative_path"] == row["relative_path"]), None)
+    return _record_for_ref(row["folder_identity"], row["relative_path"])
+
+
+def _records_for_tracks(track_ids):
+    """Batch form of _record_for_track: one db round-trip for many track ids instead of
+    one per id (N+1 guard for list endpoints that decorate many items at once)."""
+    by_track = {}
+    for row in db.local_deletion_links(list(track_ids)):
+        by_track.setdefault(row["track_id"], row)   # first available link wins, like _record_for_track
+    return {track_id: _record_for_ref(row["folder_identity"], row["relative_path"])
+            for track_id, row in by_track.items()}
 
 
 def _record_for_ref(folder_identity, relative_path):
-    return next((r for r in _CATALOG.records
-                 if r["folder_identity"] == folder_identity and r["relative_path"] == relative_path), None)
+    return _CATALOG.by_ref.get((folder_identity, relative_path))
 
 
 def _read_audio_tags(path):
@@ -438,6 +449,9 @@ def _decorate_workspace_items(items):
     link-less items. EVERY endpoint returning workspace items must route through this, or
     a reload (e.g. the enrich loop) drops the fields and the labels flicker/misfire."""
     downloaded_ids = _downloaded_ids()
+    needs_track_lookup = {item["track_id"] for item in items
+                          if item.get("track_id") and not (item.get("youtube_id") or item.get("track_title"))}
+    records_by_track = _records_for_tracks(needs_track_lookup) if needs_track_lookup else {}
     for item in items:
         # A download-folder file is "downloaded", not a local/untracked file. Link-only
         # items are "downloaded" when an id-named file exists in the download folder.
@@ -448,7 +462,7 @@ def _decorate_workspace_items(items):
             continue
         record = None
         if item.get("track_id"):
-            record = _record_for_track(item["track_id"])
+            record = records_by_track.get(item["track_id"])
         elif item.get("relative_path"):
             record = _record_for_ref(item["folder_identity"], item["relative_path"])
         if record is not None:
@@ -2073,6 +2087,14 @@ def _safe_delete_record(record):
         return False
 
 
+def _build_delete_target(track_id, record, path):
+    info = os.stat(path)
+    return {"track_id": track_id, "folder_identity": record["folder_identity"],
+            "relative_path": record["relative_path"], "file_size": info.st_size,
+            "modified_at": str(info.st_mtime_ns), "identity": (info.st_dev, info.st_ino),
+            "record": record, "delete_path": path}
+
+
 def _delete_targets(track_ids):
     if len(track_ids) != len(set(track_ids)):
         raise HTTPException(status_code=400, detail="track_ids must be unique")
@@ -2092,11 +2114,7 @@ def _delete_targets(track_ids):
         path = _safe_delete_record(record) if record is not None else False
         if not path:
             raise HTTPException(status_code=409, detail=f"track {track_id} local file is missing or unsafe")
-        info = os.stat(path)
-        targets.append({"track_id": track_id, "folder_identity": record["folder_identity"],
-                        "relative_path": record["relative_path"], "file_size": info.st_size,
-                        "modified_at": str(info.st_mtime_ns), "identity": (info.st_dev, info.st_ino),
-                        "record": record, "delete_path": path})
+        targets.append(_build_delete_target(track_id, record, path))
     return targets
 
 
@@ -2106,8 +2124,11 @@ def _target_state(targets):
 
 
 def _new_token(kind, payload):
+    now = time.time()
+    for stale in [t for t, data in _DELETE_TOKENS.items() if data["expires"] < now]:
+        del _DELETE_TOKENS[stale]
     token = secrets.token_urlsafe(24)
-    _DELETE_TOKENS[token] = {"kind": kind, "expires": time.time() + settings.delete_token_ttl(), **payload}
+    _DELETE_TOKENS[token] = {"kind": kind, "expires": now + settings.delete_token_ttl(), **payload}
     return token
 
 
@@ -2243,11 +2264,7 @@ def _ref_delete_targets(refs):
         path = _safe_delete_record(record) if record is not None else False
         if not path:
             raise HTTPException(status_code=409, detail=f"local file missing or unsafe: {relative_path}")
-        info = os.stat(path)
-        targets.append({"track_id": None, "folder_identity": record["folder_identity"],
-                        "relative_path": record["relative_path"], "file_size": info.st_size,
-                        "modified_at": str(info.st_mtime_ns), "identity": (info.st_dev, info.st_ino),
-                        "record": record, "delete_path": path})
+        targets.append(_build_delete_target(None, record, path))
     return targets
 
 
@@ -2854,10 +2871,13 @@ class AddFilesByPath(BaseModel):
 
 
 @app.post("/api/files/add")
-def api_files_add(req: AddFilesByPath):
+def api_files_add(req: AddFilesByPath, request: Request):
     """Add absolute-path files to one destination (DRY entry point for every screen's
     file picker): 'library' (find-or-create a track), 'workspace' (file-only item), or
-    'untracked' (Import's in-memory staged list, untracked files only)."""
+    'untracked' (Import's in-memory staged list, untracked files only). Takes raw
+    server-filesystem paths handed back by the native picker, so it's loopback-only
+    exactly like /api/pick-files."""
+    _require_loopback(request)
     if req.target not in ("library", "workspace", "untracked"):
         raise HTTPException(status_code=400, detail="target must be library, workspace, or untracked")
     results = []

@@ -87,9 +87,9 @@ onUnmounted(() => clearInterval(poll))
               </template>
               <template #append>
                 <v-chip size="x-small" :color="statusColor(t.status)" variant="tonal" class="mr-2">{{ t.status }}</v-chip>
-                <v-btn v-if="t.status === 'running'" icon="mdi-close-circle-outline" size="small" variant="text" color="error"
+                <v-btn v-if="t.status === 'running'" icon="mdi-close-circle-outline" size="small" variant="text" color="error" class="task-action-btn"
                   aria-label="Cancel task" :loading="cancelling === t.id" @click="cancel(t)" />
-                <v-btn v-else-if="t.resumable" icon="mdi-play-circle-outline" size="small" variant="text" color="primary"
+                <v-btn v-else-if="t.resumable" icon="mdi-play-circle-outline" size="small" variant="text" color="primary" class="task-action-btn"
                   aria-label="Resume task" :loading="resuming === t.id" @click="resume(t)" />
               </template>
             </v-list-item>
@@ -125,3 +125,9 @@ onUnmounted(() => clearInterval(poll))
     </v-window>
   </v-card>
 </template>
+
+<style scoped>
+@media (pointer: coarse) {
+  .task-action-btn { min-width: 44px; min-height: 44px; }
+}
+</style>

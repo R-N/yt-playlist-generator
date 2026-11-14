@@ -14,6 +14,7 @@ import unittest
 import pandas as pd
 
 import cleanup_tracked as ct
+from folder_config import is_approved
 
 
 class LoadProcessedFilesTest(unittest.TestCase):
@@ -41,13 +42,19 @@ class LoadProcessedFilesTest(unittest.TestCase):
         self.assertFalse(passes["B.mp3"])
         self.assertFalse(passes["C.mp3"])
 
-    def test_string_checks_do_not_pass(self):
+    def test_string_and_bool_checks_pass(self):
+        # cleanup_tracked uses folder_config.is_approved, which matches the backend's
+        # db._coerce_check semantics -- string/bool forms count as approved too.
         passes = self._load([
             {"filename": "A.mp3", "yt_id": "a", "check": "1"},
             {"filename": "B.mp3", "yt_id": "b", "check": "True"},
         ])
-        self.assertFalse(passes["A.mp3"])
-        self.assertFalse(passes["B.mp3"])
+        self.assertTrue(passes["A.mp3"])
+        self.assertTrue(passes["B.mp3"])
+
+
+class LoadProcessedFilesMoreTest(unittest.TestCase):
+    _load = LoadProcessedFilesTest._load
 
     def test_blank_yt_id_rows_dropped(self):
         passes = self._load([
@@ -64,6 +71,14 @@ class LoadProcessedFilesTest(unittest.TestCase):
             {"filename": "A.mp3", "yt_id": "a", "check": 1},
         ])
         self.assertTrue(passes["A.mp3"])
+
+
+class IsApprovedTest(unittest.TestCase):
+    def test_matches_backend_coerce_check_semantics(self):
+        for v in (True, 1, "1", "True", "TRUE", "true", 1.0):
+            self.assertTrue(is_approved(v), v)
+        for v in (False, 0, "0", "False", "FALSE", "false", 0.0, None, float("nan"), "", "maybe"):
+            self.assertFalse(is_approved(v), v)
 
 
 class MainDeletionSafetyTest(unittest.TestCase):

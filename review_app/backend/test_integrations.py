@@ -3,6 +3,7 @@ service, and the job catalog. Network and subprocess work is stubbed out."""
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -220,6 +221,24 @@ class TestJobs(unittest.TestCase):
         jobs.start("job_test", finalize=lambda name: seen.append(jobs.state(name)["status"]))
         jobs.stop("job_test")
         self.assertEqual(seen, ["finalizing"])
+
+    def test_stop_before_launch_never_spawns_and_reports_stopped(self):
+        launches = []
+        with mock.patch.object(jobs.threading, "Thread") as thread_cls:
+            jobs.start("job_test", finalize=lambda name: launches.append("finalize"))
+        run = thread_cls.call_args.kwargs["target"]     # launcher not yet running
+        stopper = threading.Thread(target=jobs.stop, args=("job_test",))
+        began = time.monotonic()
+        stopper.start()
+        while jobs.state("job_test")["status"] != "stopping":
+            time.sleep(.005)
+        with mock.patch.object(jobs.subprocess, "Popen") as popen:
+            run()
+        stopper.join(5)
+        self.assertFalse(popen.called)
+        self.assertLess(time.monotonic() - began, jobs.STOP_GRACE)
+        self.assertEqual(jobs.state("job_test")["status"], "stopped")
+        self.assertEqual(launches, ["finalize"])
 
     def test_curation_lease_spans_prepare_and_finalize(self):
         events = []

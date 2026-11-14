@@ -3,21 +3,14 @@ import time
 import random
 import mutagen
 import pandas as pd
-import re
 import traceback
 
-from folder_config import resolve_mp3_folders
+from folder_config import DEFAULT_MP3_FOLDERS, is_approved, is_valid_youtube_id, resolve_mp3_folders
 
 ACOUSTID_API_KEY = None
-MP3_FOLDERS = resolve_mp3_folders([
-    "E:/Music/My Music",
-    "E:/Music/My Music Out 2",
-    "E:/Music/downloads",
-])
+MP3_FOLDERS = resolve_mp3_folders(DEFAULT_MP3_FOLDERS)
 PROCESSED_FILE = "matches.csv"
 
-def is_valid_youtube_id(s):
-    return bool(re.fullmatch(r"[a-zA-Z0-9_-]{11}", s or ""))
 
 def get_metadata(mp3_path, separators=['-', '–']):
     try:
@@ -58,7 +51,7 @@ def load_processed_files():
         df = df[df['yt_id'].notna() & (df['yt_id'] != '')]
         df = df.sort_values("check", ascending=True).drop_duplicates(subset="filename", keep="last")
         df = df.set_index("filename")
-        passes = df["check"] == 1
+        passes = df["check"].map(is_approved)
         passes = passes.to_dict()
         return passes
     return {}

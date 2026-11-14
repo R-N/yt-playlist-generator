@@ -11,7 +11,8 @@ import { useDisplay } from 'vuetify'
 import NativeConnection from './NativeConnection.vue'
 import { clearNativeServerUrl, getNativeServerUrl, isNativeRuntime } from './native'
 
-const navigation = PRIMARY_NAV.filter((item) => item.value !== 'settings')
+const navigation = PRIMARY_NAV.filter((item) => !item.inSettingsSlot)
+const settingsItem = PRIMARY_NAV.find((item) => item.inSettingsSlot)
 const { mobile } = useDisplay()
 const native = isNativeRuntime()
 const serverUrl = ref(native ? getNativeServerUrl() : '')
@@ -42,7 +43,7 @@ function forgetServer() { clearNativeServerUrl(); serverUrl.value = '' }
         <v-list-item v-for="item in navigation" :key="item.value" :active="tab === item.value" @click="go(item.value)"
           :prepend-icon="item.icon" :title="item.label" rounded="lg" />
       </v-list>
-      <template #append><v-list nav density="comfortable"><v-list-item :active="tab === 'settings'" @click="go('settings')" prepend-icon="mdi-tune" title="Settings" rounded="lg" /></v-list></template>
+      <template #append><v-list nav density="comfortable"><v-list-item :active="tab === settingsItem.value" @click="go(settingsItem.value)" :prepend-icon="settingsItem.icon" :title="settingsItem.label" rounded="lg" /></v-list></template>
     </v-navigation-drawer>
     <v-main class="app-main">
       <NativeConnection v-if="native && !connected" @connected="connect" />

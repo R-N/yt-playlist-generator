@@ -2,6 +2,13 @@
 
 import json
 import os
+import re
+
+DEFAULT_MP3_FOLDERS = [
+    "E:/Music/My Music",
+    "E:/Music/My Music Out 2",
+    "E:/Music/downloads",
+]
 
 
 def resolve_mp3_folders(defaults, env_name="MP3_FOLDERS_JSON"):
@@ -34,3 +41,14 @@ def resolve_mp3_folders(defaults, env_name="MP3_FOLDERS_JSON"):
             if common == root or common == other:
                 raise ValueError(f"{env_name} contains overlapping directories: {root!r}, {other!r}")
     return roots
+
+
+def is_valid_youtube_id(s):
+    return bool(re.fullmatch(r"[a-zA-Z0-9_-]{11}", s or ""))
+
+
+def is_approved(value):
+    """True iff `value` encodes an approved/checked row (matches review_app's
+    backend db._coerce_check's `1` case: bool/int/str forms, incl. 1.0 floats
+    from pandas via equality)."""
+    return value in (True, 1, "1", "True", "TRUE", "true")

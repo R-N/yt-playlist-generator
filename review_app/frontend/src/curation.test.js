@@ -13,7 +13,7 @@ vi.mock('./api', () => ({
 import { api } from './api'
 import {
   useLabelFilter, usePagination, useSelection, ytUrl, fileMenuItems,
-  usePreview, useRowActions, withNewBase,
+  usePreview, useRowActions, withNewBase, labelMenuTarget,
   ytMenuItems, libraryLabelMenu, workspaceLabelMenu,
 } from './curation'
 
@@ -108,6 +108,28 @@ describe('ytUrl', () => {
     expect(ytUrl({ youtube_id: 'abc' })).toBe('https://www.youtube.com/watch?v=abc')
     expect(ytUrl({ yt_id: 'def' })).toBe('https://www.youtube.com/watch?v=def')
     expect(ytUrl({})).toBeNull()
+  })
+})
+
+describe('labelMenuTarget', () => {
+  it('uses clientX/clientY for a real mouse click', () => {
+    const rect = { left: 999, bottom: 999 }
+    const ev = { detail: 1, clientX: 42, clientY: 84, currentTarget: { getBoundingClientRect: () => rect } }
+    expect(labelMenuTarget(ev)).toEqual([42, 84])
+  })
+  it('falls back to the target rect for a keyboard-activated click (detail===0)', () => {
+    const rect = { left: 10, bottom: 30 }
+    const ev = { detail: 0, clientX: 0, clientY: 0, currentTarget: { getBoundingClientRect: () => rect } }
+    expect(labelMenuTarget(ev)).toEqual([10, 30])
+  })
+  it('falls back to the target rect when clientX/clientY are both 0 even with nonzero detail', () => {
+    const rect = { left: 5, bottom: 7 }
+    const ev = { detail: 1, clientX: 0, clientY: 0, currentTarget: { getBoundingClientRect: () => rect } }
+    expect(labelMenuTarget(ev)).toEqual([5, 7])
+  })
+  it('falls back to clientX/clientY (0,0) when there is no currentTarget rect', () => {
+    const ev = { detail: 0, clientX: 0, clientY: 0, currentTarget: null }
+    expect(labelMenuTarget(ev)).toEqual([0, 0])
   })
 })
 

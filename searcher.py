@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pykakasi
 import unicodedata
 
-from folder_config import resolve_mp3_folders
+from folder_config import DEFAULT_MP3_FOLDERS, is_valid_youtube_id, resolve_mp3_folders
 
 YDL_OPTS = {
   # "cookiesfrombrowser": ("brave", "Profile 1"),
@@ -23,11 +23,7 @@ YDL_OPTS = {
 }
 
 ACOUSTID_API_KEY = None
-MP3_FOLDERS = resolve_mp3_folders([
-    "E:/Music/My Music",
-    "E:/Music/My Music Out 2",
-    "E:/Music/downloads",
-])
+MP3_FOLDERS = resolve_mp3_folders(DEFAULT_MP3_FOLDERS)
 OUTPUT_FILE = "matches.csv"
 SIGN_IN_FILE = "sign_in.txt"
 BATCH_SIZE = 1
@@ -43,9 +39,6 @@ no_id = False
 
 if ACOUSTID_API_KEY:
     import acoustid
-
-def is_valid_youtube_id(s):
-    return bool(re.fullmatch(r"[a-zA-Z0-9_-]{11}", s))
 
 def penalized_partial_ratio(a: str, b: str, penalty_strength: float = 0.1) -> float:
     a, b = a.lower(), b.lower()

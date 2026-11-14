@@ -13,6 +13,7 @@ const flow = ref('paste')
 const untracked = ref([])
 const { selected: selectedFiles, toggle } = useSelection()   // fkey list
 const filesBusy = ref('')
+const filesLoading = ref(false)
 const fileNotice = ref('')
 const fkey = (file) => `${file.folder_identity}|${file.relative_path}`
 const selectedFileRefs = computed(() => untracked.value.filter((file) => selectedFiles.value.includes(fkey(file)))
@@ -48,6 +49,7 @@ function untrackedAction(mode) {
   else if (mode === 'send') sendFiles(refs)
 }
 async function loadUntracked() {
+  filesLoading.value = true
   try {
     const [files, staged, ws] = await Promise.all([api.localFiles(), api.stagedFiles(), api.workspace()])
     // A file already staged in Workspace leaves the untracked list (it's been imported).
@@ -56,6 +58,7 @@ async function loadUntracked() {
     const seen = new Set(catalog.map(fkey))
     untracked.value = [...catalog, ...staged.files.filter((file) => !seen.has(fkey(file)) && !inWs.has(fkey(file)))]
   } catch (e) { error.value = String(e) }
+  finally { filesLoading.value = false }
 }
 // Import stages picked files in server memory as untracked-only (see /api/files/add).
 const { picking, pickFiles } = useFilePicker({
@@ -160,7 +163,8 @@ function copy(value) { navigator.clipboard?.writeText(value) }
           <v-btn size="small" variant="text" icon="mdi-refresh" aria-label="Rescan" @click="loadUntracked" />
         </div>
         <v-alert v-if="fileNotice" type="info" variant="tonal" closable class="mb-3" @click:close="fileNotice = ''">{{ fileNotice }}</v-alert>
-        <CurationList v-if="untracked.length"
+        <div v-if="filesLoading" class="pa-12 text-center"><v-progress-circular indeterminate color="primary" /></div>
+        <CurationList v-else-if="untracked.length"
           :rows="listRows" :selected="selectedFiles" :preview-for="preview.previewFor"
           v-model:page="page" v-model:per-page="perPage" :page-count="pageCount" :has-items="untracked.length > 0"
           @toggle="(row) => toggle(row.key)" @label="onLabel" />

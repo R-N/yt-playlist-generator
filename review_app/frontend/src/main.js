@@ -18,6 +18,7 @@ const dark = {
     error: '#F0616A',
     warning: '#F5B14A',
     info: '#6FB6F2',
+    workspace: '#7C4DFF',
   },
 }
 
@@ -26,12 +27,6 @@ const vuetify = createVuetify({
   defaults: {
     VCard: { rounded: 'lg' },
     VBtn: { rounded: 'lg' },
-    // Denser defaults across the app — the comfortable defaults read as mobile-sized.
-    VList: { density: 'compact' },
-    VTextField: { density: 'compact' },
-    VSelect: { density: 'compact' },
-    VDataTable: { density: 'compact' },
-    VToolbar: { density: 'compact' },
   },
 })
 

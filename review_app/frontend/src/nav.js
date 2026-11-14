@@ -8,27 +8,71 @@ export const PRIMARY_NAV = [
   { value: 'library', icon: 'mdi-music-box-multiple', label: 'Library', subtitle: 'tracks + saved links' },
   { value: 'review', icon: 'mdi-check-decagram', label: 'Review', subtitle: 'approve / reject by ear' },
   { value: 'activity', icon: 'mdi-history', label: 'Activity', subtitle: 'tasks + history' },
-  { value: 'settings', icon: 'mdi-tune', label: 'Settings', subtitle: 'folders + maintenance' },
+  { value: 'settings', icon: 'mdi-tune', label: 'Settings', subtitle: 'folders + maintenance', inSettingsSlot: true },
 ]
 
 export function isPrimaryTab(value) { return PRIMARY_NAV.some((item) => item.value === value) }
 
-// URL hash <-> active tab, so each menu has its own path (#/library) with
-// working back/forward and shareable links — no vue-router dependency.
+// URL hash <-> active tab + optional focus state, so each screen has its own
+// shareable path with working back/forward — no vue-router dependency.
+//   #/library?ids=1,2,3   isolate those Library track ids
+//   #/workspace?ids=1,2,3 isolate those Workspace item ids
+//   #/review?track=5      jump straight into reviewing track 5
+import { api } from './api'
+
 const hasWindow = typeof window !== 'undefined'
-const tabFromHash = () => (hasWindow ? window.location.hash.replace(/^#\/?/, '') : '')
+const hashBody = () => (hasWindow ? window.location.hash.replace(/^#\/?/, '') : '')
+const tabFromHash = () => hashBody().split('?')[0]
+const paramsFromHash = () => new URLSearchParams(hashBody().split('?')[1] || '')
+function parseIds(param) {
+  if (!param) return null
+  const ids = param.split(',').map(Number).filter(Number.isFinite)
+  return ids.length ? ids : null
+}
 
 export const activeTab = ref(isPrimaryTab(tabFromHash()) ? tabFromHash() : 'workspace')
 export const focusTrack = ref(null)   // a full track row to review right now, or null
 export const dataRevision = ref(0)
 
+// Isolate specific track ids in the Library list (used by Workspace "Show in library").
+export const libraryFocusIds = ref(activeTab.value === 'library' ? parseIds(paramsFromHash().get('ids')) : null)
+// Isolate specific Workspace item ids (mirror of libraryFocusIds, for "Show in Workspace").
+export const workspaceFocusIds = ref(activeTab.value === 'workspace' ? parseIds(paramsFromHash().get('ids')) : null)
+
+function hashForState() {
+  const params = new URLSearchParams()
+  if (activeTab.value === 'library' && libraryFocusIds.value?.length) params.set('ids', libraryFocusIds.value.join(','))
+  else if (activeTab.value === 'workspace' && workspaceFocusIds.value?.length) params.set('ids', workspaceFocusIds.value.join(','))
+  else if (activeTab.value === 'review' && focusTrack.value?.id != null) params.set('track', focusTrack.value.id)
+  const qs = params.toString()
+  return qs ? `/${activeTab.value}?${qs}` : `/${activeTab.value}`
+}
+
+// Re-derive tab + focus state from the hash — used on load and on every
+// hashchange (including Back/Forward), so history travel undoes a focus jump.
+function applyHash() {
+  const tab = tabFromHash()
+  if (!isPrimaryTab(tab)) return
+  const params = paramsFromHash()
+  if (tab !== activeTab.value) activeTab.value = tab
+  if (tab === 'library') libraryFocusIds.value = parseIds(params.get('ids'))
+  if (tab === 'workspace') workspaceFocusIds.value = parseIds(params.get('ids'))
+  if (tab === 'review') {
+    const trackId = params.get('track')
+    if (!trackId) focusTrack.value = null
+    else if (String(focusTrack.value?.id) !== trackId) {
+      api.track(Number(trackId)).then((track) => { focusTrack.value = track }).catch(() => { focusTrack.value = null })
+    }
+  }
+}
+
 if (hasWindow) {
-  if (tabFromHash() !== activeTab.value) window.location.hash = '/' + activeTab.value
-  watch(activeTab, (value) => { if (tabFromHash() !== value) window.location.hash = '/' + value })
-  window.addEventListener('hashchange', () => {
-    const value = tabFromHash()
-    if (isPrimaryTab(value) && value !== activeTab.value) activeTab.value = value
+  if (window.location.hash.replace(/^#/, '') !== hashForState()) window.location.hash = hashForState()
+  watch([activeTab, libraryFocusIds, workspaceFocusIds, focusTrack], () => {
+    const next = hashForState()
+    if (window.location.hash.replace(/^#/, '') !== next) window.location.hash = next
   })
+  window.addEventListener('hashchange', applyHash)
 }
 
 export function invalidateData() { dataRevision.value += 1 }
@@ -49,15 +93,11 @@ export function reviewTrack(track) {
   activeTab.value = 'review'
 }
 
-// Isolate specific track ids in the Library list (used by Workspace "Show in library").
-export const libraryFocusIds = ref(null)
 export function showInLibrary(ids) {
   libraryFocusIds.value = ids && ids.length ? ids : null
   activeTab.value = 'library'
 }
 
-// Isolate specific Workspace item ids (mirror of showInLibrary, for "Show in Workspace").
-export const workspaceFocusIds = ref(null)
 export function showInWorkspace(ids) {
   workspaceFocusIds.value = ids && ids.length ? ids : null
   activeTab.value = 'workspace'

@@ -5,7 +5,7 @@ import { activeTab, focusTrack, invalidateData, reviewTrack } from './nav'
 import { keyToAction, fmt, advanceIndex, prevIndex, youtubeEmbed, confidenceColor } from './review'
 import { formatDuration } from './workspace'
 import { buildLabels } from './labels'
-import { useRowActions, useSearchPicker, useForceSet, useMembershipActions, useAudioDownload, useLocalDelete, ytUrl, ytMenuItems, STATUS_MENU_ITEMS, libraryLabelMenu, workspaceLabelMenu, fileMenuItems, downloadMenuItems } from './curation'
+import { useRowActions, useSearchPicker, useForceSet, useMembershipActions, useAudioDownload, useLocalDelete, ytUrl, ytMenuItems, STATUS_MENU_ITEMS, libraryLabelMenu, workspaceLabelMenu, fileMenuItems, downloadMenuItems, labelMenuTarget } from './curation'
 import LabelRow from './LabelRow.vue'
 import ActionMenu from './ActionMenu.vue'
 import MediaPreview from './MediaPreview.vue'
@@ -215,7 +215,7 @@ const reviewRow = computed(() => {
 })
 
 function onLabel(row, label, ev) {
-  const target = [ev.clientX, ev.clientY]
+  const target = labelMenuTarget(ev)
   const t = row.raw
   if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, row, items: ytMenuItems(row.ytId, { canFindLocal: !t.has_local, canSetLocal: true }) }
   else if (label.key === 'local') fileMenu.value = { open: true, target, row, source: 'local', items: fileMenuItems({ deletable: true, source: 'local', canFindYoutube: !row.ytId, canSetYoutube: true, canEmbed: true }) }
@@ -354,7 +354,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 
 <template>
   <!-- Single row: filter, inline match metrics, icon decide buttons. -->
-  <div class="review-toolbar d-flex align-center flex-wrap mb-4" style="gap:6px 14px">
+  <div class="review-toolbar d-flex align-center flex-wrap mb-4" style="gap:8px 14px">
     <v-select v-model="status" :items="['unreviewed','approved','rejected','all']"
       density="compact" variant="solo-filled" flat hide-details
       prepend-inner-icon="mdi-filter-variant" style="min-width:200px;max-width:220px"
@@ -540,5 +540,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 .metric-label {
   font-size: .62rem; text-transform: uppercase; letter-spacing: .05em;
   opacity: .55; margin-right: 5px; font-weight: 500;
+}
+/* Coarse pointers (touch) get a >=44px tap target on the decide-toolbar buttons. */
+@media (pointer: coarse) {
+  .review-toolbar :deep(.v-btn--icon) { width: 44px; height: 44px; }
 }
 </style>

@@ -45,3 +45,4 @@ __pycache__/
 *.pyc
 tmp*.tmp
 *.tmp
+/graphify-out

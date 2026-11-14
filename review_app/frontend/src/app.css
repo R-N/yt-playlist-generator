@@ -1,12 +1,22 @@
-/* Vuetify sizes in rem; shrinking the root scales the whole app down from its
-   comfortable/mobile-ish defaults to a denser desktop feel. */
-:root { color-scheme: dark; font-size: 14px; }
+/* Root stays at the browser default (16px) so rem-sized Vuetify components hit
+   comfortable, accessible touch targets instead of a shrunk desktop-dense feel. */
+:root { color-scheme: dark; }
 body { -webkit-font-smoothing: antialiased; overflow-x: hidden; }
 .app-main, .v-application { min-width: 0; }
 .tab-wrap { width: min(100%, 1240px); margin: 0 auto; padding: 20px; }
 audio { width: 100%; }
 .mobile-app-bar .v-toolbar-title { min-width: 0; }
 .responsive-toolbar { height: auto !important; min-height: 48px; }
+.mobile-app-bar { padding-top: env(safe-area-inset-top, 0px); }
+.curation-foot { padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 .responsive-toolbar .v-toolbar__content { height: auto !important; min-height: 48px; flex-wrap: wrap; gap: 2px; padding-block: 4px; }
 .responsive-toolbar .v-field { min-width: 140px; }
 .responsive-toolbar .v-text-field { flex: 1 1 220px !important; }

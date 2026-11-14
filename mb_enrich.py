@@ -18,6 +18,7 @@ No key needed -- MusicBrainz allows anonymous queries at <= 1 req/sec (honored b
 Run (resumable): python mb_enrich.py
 """
 import json
+import signal
 import time
 import urllib.parse
 import urllib.request
@@ -83,50 +84,56 @@ def search_recording(artist, title):
     return parse_recording(rows[0]) if rows else {}
 
 
+def _raise_sigterm(signum, frame):
+    raise SystemExit(0)
+
+
 def main():
+    signal.signal(signal.SIGTERM, _raise_sigterm)   # Stop button sends SIGTERM; save before exit
     df = pd.read_csv(MATCHES_CSV)
     for col in NEW_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
     done = matched = 0
-    for i, row in df.iterrows():
-        if row.get("mbt_done") in (1, 1.0, True, "True"):
-            continue
-        if not _blank(row.get("mb_recording_id")):
-            df.at[i, "mbt_done"] = 1          # already has a (fingerprint) match; leave it
-            continue
-        artist, title = row.get("artist"), row.get("title")
-        if _blank(title) and _blank(artist):
-            df.at[i, "mbt_done"] = 1
-            continue
-
-        hit = search_recording(str(artist or ""), str(title or ""))
-        df.at[i, "mbt_done"] = 1
-        if hit and hit["mb_recording_id"]:
-            matched += 1
-            for k, v in hit.items():
-                df.at[i, k] = v
-            df.at[i, "mb_source"] = "text"
-            # ac_score=None -> a text match never earns an auto-approve suggestion.
-            conf, suggest = match_confidence(
-                hit["mb_artist"], hit["mb_title"],
-                row.get("yt_channel"), row.get("yt_title"), None)
-            df.at[i, "mb_confidence"] = conf
-            df.at[i, "mb_suggest"] = 1 if suggest else 0
-            print(f"[{i}] {hit['mb_artist']} - {hit['mb_title']}  ({hit['mb_text_score']}, {conf})")
-
-        done += 1
-        if done % SAVE_EVERY == 0:
-            df.to_csv(MATCHES_CSV, index=False)
-            print(f"  ...checkpoint ({done} attempted, {matched} matched)")
-        time.sleep(RATE_LIMIT_S)
-
-    df.to_csv(MATCHES_CSV, index=False)
     try:
-        df.to_excel(MATCHES_XLSX, index=False)
-    except Exception as e:
-        print(f"Skipped writing {MATCHES_XLSX}: {e}")
+        for i, row in df.iterrows():
+            if row.get("mbt_done") in (1, 1.0, True, "True"):
+                continue
+            if not _blank(row.get("mb_recording_id")):
+                df.at[i, "mbt_done"] = 1          # already has a (fingerprint) match; leave it
+                continue
+            artist, title = row.get("artist"), row.get("title")
+            if _blank(title) and _blank(artist):
+                df.at[i, "mbt_done"] = 1
+                continue
+
+            hit = search_recording(str(artist or ""), str(title or ""))
+            df.at[i, "mbt_done"] = 1
+            if hit and hit["mb_recording_id"]:
+                matched += 1
+                for k, v in hit.items():
+                    df.at[i, k] = v
+                df.at[i, "mb_source"] = "text"
+                # ac_score=None -> a text match never earns an auto-approve suggestion.
+                conf, suggest = match_confidence(
+                    hit["mb_artist"], hit["mb_title"],
+                    row.get("yt_channel"), row.get("yt_title"), None)
+                df.at[i, "mb_confidence"] = conf
+                df.at[i, "mb_suggest"] = 1 if suggest else 0
+                print(f"[{i}] {hit['mb_artist']} - {hit['mb_title']}  ({hit['mb_text_score']}, {conf})")
+
+            done += 1
+            if done % SAVE_EVERY == 0:
+                df.to_csv(MATCHES_CSV, index=False)
+                print(f"  ...checkpoint ({done} attempted, {matched} matched)")
+            time.sleep(RATE_LIMIT_S)
+    finally:
+        df.to_csv(MATCHES_CSV, index=False)
+        try:
+            df.to_excel(MATCHES_XLSX, index=False)
+        except Exception as e:
+            print(f"Skipped writing {MATCHES_XLSX}: {e}")
     print(f"Done. Attempted {done}, matched {matched}.")
 
 

@@ -22,20 +22,17 @@ Setup: see review_app/README or the project docs. Needs fpcalc on PATH,
 Run (resumable): python acoustid_enrich.py
 """
 import os
+import signal
 import sys
 import time
 
 import pandas as pd
 
-from folder_config import resolve_mp3_folders
+from folder_config import DEFAULT_MP3_FOLDERS, resolve_mp3_folders
 
 MATCHES_CSV = "matches.csv"
 MATCHES_XLSX = "matches.xlsx"
-MP3_FOLDERS = resolve_mp3_folders([
-    "E:/Music/My Music",
-    "E:/Music/My Music Out 2",
-    "E:/Music/downloads",
-])
+MP3_FOLDERS = resolve_mp3_folders(DEFAULT_MP3_FOLDERS)
 
 API_KEY = os.environ.get("ACOUSTID_API_KEY")
 RATE_LIMIT_S = 0.34        # AcoustID asks for <= 3 requests/second
@@ -120,9 +117,14 @@ def lookup_acoustid(path):
         return {}
 
 
+def _raise_sigterm(signum, frame):
+    raise SystemExit(0)
+
+
 def main():
     if not API_KEY:
         sys.exit("Set ACOUSTID_API_KEY (see setup docs) before running.")
+    signal.signal(signal.SIGTERM, _raise_sigterm)   # Stop button sends SIGTERM; save before exit
 
     df = pd.read_csv(MATCHES_CSV)
     for col in NEW_COLUMNS:
@@ -131,38 +133,39 @@ def main():
     index = build_file_index(MP3_FOLDERS)
 
     done = matched = 0
-    for i, row in df.iterrows():
-        if row.get("ac_done") in (1, 1.0, True, "True"):
-            continue                    # resumable: skip already-attempted
-        path = index.get(row["filename"])
-        if not path:
-            continue
-
-        hit = lookup_acoustid(path)
-        df.at[i, "ac_done"] = 1
-        if hit:
-            matched += 1
-            for k, v in hit.items():
-                df.at[i, k] = v
-            conf, suggest = match_confidence(
-                hit.get("mb_artist"), hit.get("mb_title"),
-                row.get("yt_channel"), row.get("yt_title"), hit.get("ac_score"))
-            df.at[i, "mb_confidence"] = conf
-            df.at[i, "mb_suggest"] = 1 if suggest else 0
-            print(f"[{i}] {hit.get('mb_artist')} - {hit.get('mb_title')}  "
-                  f"({hit.get('ac_score'):.2f}, {conf})")
-
-        done += 1
-        if done % SAVE_EVERY == 0:
-            df.to_csv(MATCHES_CSV, index=False)
-            print(f"  ...checkpoint ({done} attempted, {matched} matched)")
-        time.sleep(RATE_LIMIT_S)
-
-    df.to_csv(MATCHES_CSV, index=False)
     try:
-        df.to_excel(MATCHES_XLSX, index=False)
-    except Exception as e:
-        print(f"Skipped writing {MATCHES_XLSX}: {e}")
+        for i, row in df.iterrows():
+            if row.get("ac_done") in (1, 1.0, True, "True"):
+                continue                    # resumable: skip already-attempted
+            path = index.get(row["filename"])
+            if not path:
+                continue
+
+            hit = lookup_acoustid(path)
+            df.at[i, "ac_done"] = 1
+            if hit:
+                matched += 1
+                for k, v in hit.items():
+                    df.at[i, k] = v
+                conf, suggest = match_confidence(
+                    hit.get("mb_artist"), hit.get("mb_title"),
+                    row.get("yt_channel"), row.get("yt_title"), hit.get("ac_score"))
+                df.at[i, "mb_confidence"] = conf
+                df.at[i, "mb_suggest"] = 1 if suggest else 0
+                print(f"[{i}] {hit.get('mb_artist')} - {hit.get('mb_title')}  "
+                      f"({hit.get('ac_score'):.2f}, {conf})")
+
+            done += 1
+            if done % SAVE_EVERY == 0:
+                df.to_csv(MATCHES_CSV, index=False)
+                print(f"  ...checkpoint ({done} attempted, {matched} matched)")
+            time.sleep(RATE_LIMIT_S)
+    finally:
+        df.to_csv(MATCHES_CSV, index=False)
+        try:
+            df.to_excel(MATCHES_XLSX, index=False)
+        except Exception as e:
+            print(f"Skipped writing {MATCHES_XLSX}: {e}")
     print(f"Done. Attempted {done}, matched {matched}.")
 
 

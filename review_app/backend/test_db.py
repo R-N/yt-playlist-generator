@@ -881,6 +881,75 @@ class RemoveTracksTest(DbTestBase):
     def test_unknown_id_noop(self):
         self.assertEqual(db.remove_tracks([999999]), [])
 
+    def test_removes_track_keeps_decision_history(self):
+        # decisions is append-only: a removed track must not take its approve/reject
+        # rows with it -- track_id nulls via FK ON DELETE SET NULL, filename/decision stay.
+        rows, _ = db.get_rows(status="all")
+        tid = rows[0]["id"]
+        db.record_decision(tid, True, ["youtube"])
+        removed = db.remove_tracks([tid])
+        self.assertEqual(removed, ["vid12345678"])
+        conn = db.connect()
+        try:
+            decisions = [dict(r) for r in conn.execute(
+                "SELECT track_id, filename, decision FROM decisions")]
+        finally:
+            conn.close()
+        self.assertEqual(len(decisions), 1)
+        self.assertIsNone(decisions[0]["track_id"])
+        self.assertEqual(decisions[0]["filename"], "gone.mp3")
+        self.assertEqual(decisions[0]["decision"], 1)
+
+
+class DecisionsMigrationTest(DbTestBase):
+    def test_migration_from_legacy_schema_preserves_rows(self):
+        write_matches(db.MATCHES_CSV, [{"filename": "a.mp3", "yt_id": "vid12345678", "check": 1}])
+        write_matches(db.MATCHES_XLSX, [{"filename": "a.mp3", "yt_id": "vid12345678", "check": 1}])
+        db.init_db()
+        tid = db.get_rows(status="all")[0][0]["id"]
+        db.record_decision(tid, True, ["youtube"])
+        # Simulate a pre-migration DB: swap decisions back to the legacy NOT NULL,
+        # no-ON-DELETE-action form, keeping the existing row.
+        conn = db.connect()
+        try:
+            with conn:
+                conn.execute("ALTER TABLE decisions RENAME TO decisions_legacy")
+                conn.execute("""
+                    CREATE TABLE decisions (
+                        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                        track_id  INTEGER NOT NULL REFERENCES tracks(id),
+                        filename  TEXT NOT NULL,
+                        yt_id     TEXT,
+                        decision  INTEGER NOT NULL,
+                        ts        TEXT NOT NULL,
+                        checklist TEXT
+                    )
+                """)
+                conn.execute("INSERT INTO decisions SELECT * FROM decisions_legacy")
+                conn.execute("DROP TABLE decisions_legacy")
+        finally:
+            conn.close()
+        db.init_db()   # must migrate decisions to nullable track_id, preserving the row
+        conn = db.connect()
+        try:
+            notnull = next(r[3] for r in conn.execute("PRAGMA table_info(decisions)")
+                           if r[1] == "track_id")
+            self.assertEqual(notnull, 0)
+            row = conn.execute("SELECT track_id, decision, checklist FROM decisions").fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row["track_id"], tid)
+        self.assertEqual(row["decision"], 1)
+        self.assertEqual(json.loads(row["checklist"]), ["youtube"])
+        # and the new FK action actually fires: removing the track nulls, doesn't orphan/break
+        removed = db.remove_tracks([tid])
+        self.assertEqual(removed, ["vid12345678"])
+        conn = db.connect()
+        try:
+            self.assertIsNone(conn.execute("SELECT track_id FROM decisions").fetchone()[0])
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -78,6 +78,19 @@ export function ytUrl(row) {
   return row?.youtube_url || (id ? `https://www.youtube.com/watch?v=${id}` : null)
 }
 
+// Anchor point for a label-click context menu (ActionMenu's `target`). Mouse
+// clicks carry a real clientX/clientY; keyboard-activated clicks (Enter/Space
+// on the focused label button) fire with detail===0 and clientX/clientY both
+// 0 — anchoring there would open the menu at the viewport's top-left corner.
+// Fall back to the clicked element's own rect (bottom-left corner) instead.
+export function labelMenuTarget(ev) {
+  if (ev.detail === 0 || (ev.clientX === 0 && ev.clientY === 0)) {
+    const rect = ev.currentTarget?.getBoundingClientRect?.()
+    if (rect) return [rect.left, rect.bottom]
+  }
+  return [ev.clientX, ev.clientY]
+}
+
 // Swap the basename (either separator) in a relative path — for in-place rename patches.
 export function withNewBase(path, name) { return String(path || '').replace(/[^\\/]+$/, name) }
 

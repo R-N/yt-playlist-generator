@@ -21,7 +21,7 @@ export function buildLabels({ hasLink = false, aliveLink = false, deadLink = fal
   if (untracked) labels.push({ key: 'untracked', label: 'Untracked file', color: 'warning', icon: 'mdi-file-question-outline' })
   if (downloaded) labels.push({ key: 'downloaded', label: 'Downloaded', color: 'info', icon: 'mdi-download-circle' })
   if (inLibrary != null) labels.push({ key: 'inlibrary', label: 'In Library', color: 'secondary', icon: 'mdi-music-box-multiple', tooltip: `In Library · #${inLibrary}`, trackId: inLibrary })
-  if (inWorkspace != null) labels.push({ key: 'inworkspace', label: 'In Workspace', color: 'deep-purple-accent-3', icon: 'mdi-tray-full', tooltip: 'In Workspace', workspaceItemId: inWorkspace })
+  if (inWorkspace != null) labels.push({ key: 'inworkspace', label: 'In Workspace', color: 'workspace', icon: 'mdi-tray-full', tooltip: 'In Workspace', workspaceItemId: inWorkspace })
   if (check === 1) labels.push({ key: 'confirmed', label: 'Confirmed', color: 'success', icon: 'mdi-check-decagram' })
   else if (check === 0) labels.push({ key: 'rejected', label: 'Rejected', color: 'grey', icon: 'mdi-close-circle-outline' })
   return labels

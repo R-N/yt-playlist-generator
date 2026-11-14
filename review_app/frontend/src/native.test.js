@@ -36,6 +36,17 @@ describe('native server URLs', () => {
     expect(normalizeNativeServerUrl('https://203.0.113.20:8443')).toBe('https://203.0.113.20:8443')
   })
 
+  it('accepts private IPv6 HTTP addresses (loopback, ULA, link-local)', () => {
+    expect(normalizeNativeServerUrl('http://[::1]:8000/')).toBe('http://[::1]:8000')
+    expect(normalizeNativeServerUrl('http://[fc00::1]:8000')).toBe('http://[fc00::1]:8000')
+    expect(normalizeNativeServerUrl('http://[fd12:3456:789a::1]:8000')).toBe('http://[fd12:3456:789a::1]:8000')
+    expect(normalizeNativeServerUrl('http://[fe80::1]:8000')).toBe('http://[fe80::1]:8000')
+  })
+
+  it('rejects public IPv6 HTTP addresses', () => {
+    expect(() => normalizeNativeServerUrl('http://[2001:db8::1]:8000')).toThrow()
+  })
+
   it('rejects public, loopback, and link-local HTTP IPv4 addresses', () => {
     for (const address of ['8.8.8.8', '127.0.0.1', '169.254.10.20']) {
       expect(() => normalizeNativeServerUrl(`http://${address}:8000`)).toThrow()

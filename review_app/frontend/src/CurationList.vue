@@ -53,7 +53,7 @@ const emit = defineEmits(['toggle', 'label', 'update:page', 'update:perPage'])
     <slot v-else-if="!hasItems" name="empty"><div class="pa-8 text-center text-medium-emphasis">Nothing here yet.</div></slot>
     <div v-else class="pa-8 text-center text-medium-emphasis">No items match this filter.</div>
     <div v-if="rows.length" class="d-flex align-center justify-space-between px-3 py-2 curation-foot">
-      <v-select :model-value="perPage" :items="[25,50,100,200]" density="compact" variant="plain" hide-details style="max-width:88px" @update:model-value="emit('update:perPage', $event)" />
+      <v-select :model-value="perPage" :items="[25,50,100,200]" variant="plain" hide-details style="max-width:88px" @update:model-value="emit('update:perPage', $event)" />
       <v-pagination :model-value="page" :length="pageCount" density="comfortable" :total-visible="6" @update:model-value="emit('update:page', $event)" />
     </div>
   </v-card>
@@ -72,7 +72,7 @@ const emit = defineEmits(['toggle', 'label', 'update:page', 'update:perPage'])
   .curation-list :deep(.v-list-item-title), .curation-list :deep(.v-list-item-subtitle) { overflow-wrap: anywhere; }
   .curation-list :deep(.v-list-item-subtitle) { white-space: normal; }
   .curation-list :deep(.v-pagination__list) { flex-wrap: wrap; height: auto; gap: 2px; }
-  .curation-foot { flex-wrap: wrap; gap: 4px 8px; padding-inline: 8px !important; }
+  .curation-foot { flex-wrap: wrap; gap: 8px; padding-inline: 8px !important; }
   .curation-foot .v-pagination { margin-inline-start: auto; max-width: 100%; }
 }
 </style>

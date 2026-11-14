@@ -73,7 +73,7 @@ def init_db():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS decisions (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                track_id  INTEGER NOT NULL REFERENCES tracks(id),
+                track_id  INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
                 filename  TEXT NOT NULL,
                 yt_id     TEXT,
                 decision  INTEGER NOT NULL,    -- 1=approve, 0=reject
@@ -84,6 +84,11 @@ def init_db():
         dcols = {r[1] for r in conn.execute("PRAGMA table_info(decisions)")}
         if "checklist" not in dcols:
             conn.execute("ALTER TABLE decisions ADD COLUMN checklist TEXT")
+        # decisions is append-only history; a removed Library track must not take its
+        # approve/reject rows down with it. Legacy DBs had track_id NOT NULL with no
+        # ON DELETE action -- rebuild once to the nullable/SET NULL form above.
+        if next((r[3] for r in conn.execute("PRAGMA table_info(decisions)") if r[1] == "track_id"), 0):
+            _migrate_decisions_schema(conn)
         _init_workspace_schema(conn)
         # Health of the track's YouTube link (ok/dead/private/unknown), set by the
         # Library "Verify links" action. Added by migration for existing DBs.
@@ -152,6 +157,36 @@ def init_db():
             _import_source(conn)
     finally:
         conn.close()
+
+
+def _migrate_decisions_schema(conn):
+    """Rebuild `decisions` with a nullable track_id (FK ON DELETE SET NULL) so a removed
+    Library track's approve/reject history survives -- decisions is append-only and must
+    never be deleted. SQLite can't ALTER a column's NOT NULL flag or a FK's ON DELETE
+    action in place, so recreate the table, copy every row, then swap it in."""
+    conn.execute("SAVEPOINT decisions_schema_migration")
+    try:
+        conn.execute("""
+            CREATE TABLE decisions__v2 (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id  INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+                filename  TEXT NOT NULL,
+                yt_id     TEXT,
+                decision  INTEGER NOT NULL,
+                ts        TEXT NOT NULL,
+                checklist TEXT
+            )
+        """)
+        conn.execute(
+            "INSERT INTO decisions__v2 (id, track_id, filename, yt_id, decision, ts, checklist) "
+            "SELECT id, track_id, filename, yt_id, decision, ts, checklist FROM decisions")
+        conn.execute("DROP TABLE decisions")
+        conn.execute("ALTER TABLE decisions__v2 RENAME TO decisions")
+        conn.execute("RELEASE SAVEPOINT decisions_schema_migration")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT decisions_schema_migration")
+        conn.execute("RELEASE SAVEPOINT decisions_schema_migration")
+        raise
 
 
 _WORKSPACE_SCHEMA_VERSION = 5
@@ -871,9 +906,10 @@ def apply_track_yt(track_id, yt_id, meta=None):
 
 
 def remove_tracks(track_ids):
-    """Delete Library track rows and their dependents (links, decisions; null out
-    saved-link/workspace refs). Returns the removed tracks' youtube ids so the
-    caller can also drop their downloaded files. Does NOT touch mp3-folder files."""
+    """Delete Library track rows and their dependents (links; null out saved-link/
+    workspace refs, and decisions.track_id via FK ON DELETE SET NULL -- decisions is
+    append-only, so its rows survive the track). Returns the removed tracks' youtube
+    ids so the caller can also drop their downloaded files. Does NOT touch mp3-folder files."""
     conn = connect()
     try:
         with conn:
@@ -882,7 +918,6 @@ def remove_tracks(track_ids):
                 row = conn.execute("SELECT yt_id FROM tracks WHERE id=?", (track_id,)).fetchone()
                 if row is None:
                     continue
-                conn.execute("DELETE FROM decisions WHERE track_id=?", (track_id,))
                 conn.execute("DELETE FROM track_file_links WHERE track_id=?", (track_id,))
                 conn.execute("UPDATE saved_links SET track_id=NULL WHERE track_id=?", (track_id,))
                 conn.execute("UPDATE workspace_items SET track_id=NULL WHERE track_id=?", (track_id,))

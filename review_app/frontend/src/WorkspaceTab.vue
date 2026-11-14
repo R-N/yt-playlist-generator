@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useDisplay } from 'vuetify'
 import { api } from './api'
 import {
   selectedItems, fileDownload, preferredRun, runDismissed, batchSnapshotIds, ACTIVE_RUN_STATUSES,
@@ -7,7 +8,7 @@ import {
   itemMeta, isDead, isEnriched, healthLabel, itemTitle, itemName, itemAuthor, formatViews, formatDuration, formatUploadDate,
 } from './workspace'
 import { buildLabels, FILTER_ATTRS, matchesLabelFilter } from './labels'
-import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, useAudioDownload, useLocalDelete, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, workspaceLabelMenu, libraryLabelMenu, fileMenuItems, downloadMenuItems, untrackedMenuItems, withNewBase } from './curation'
+import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, useAudioDownload, useLocalDelete, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, workspaceLabelMenu, libraryLabelMenu, fileMenuItems, downloadMenuItems, untrackedMenuItems, withNewBase, labelMenuTarget } from './curation'
 import CurationList from './CurationList.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
 import ActionMenu from './ActionMenu.vue'
@@ -86,7 +87,7 @@ const membership = useMembershipActions({
   onNotice: (m) => { notice.value = m },
   reload: load,
   removeLibrary: (trackId) => { libRemoveConfirm.value = { trackId } },
-  removeWorkspace: (itemId) => removeItems([itemId]),
+  removeWorkspace: (itemId) => askRemoveItems([itemId]),
 })
 const lyrics = ref({ open: false, kind: 'workspace', id: null, title: '' })
 // Interactive "Find on YouTube" / "Find local file" pickers (see SearchPickerDialog).
@@ -235,10 +236,18 @@ function startVerifyLabels() {
   else verifyDialog.value = true
 }
 
-async function removeItems(ids) {
-  if (!ids.length) return
-  try { await api.workspaceRemove(ids); selected.value = selected.value.filter((id) => !ids.includes(id)); invalidateData(); await load() }
+// Removing from Workspace is confirmed: a single item gets the plain confirm,
+// a bulk removal (>1) the typed DELETE gate — same split as the other
+// destructive flows (local file delete, Library remove).
+const wsRemoveConfirm = ref(null)   // { ids, count } pending confirm
+const wsRemoveBusy = ref(false)
+function askRemoveItems(ids) { if (ids.length) wsRemoveConfirm.value = { ids, count: ids.length } }
+async function confirmRemoveItems() {
+  const ids = wsRemoveConfirm.value.ids
+  wsRemoveBusy.value = true
+  try { await api.workspaceRemove(ids); selected.value = selected.value.filter((id) => !ids.includes(id)); wsRemoveConfirm.value = null; invalidateData(); await load() }
   catch (e) { error.value = String(e) }
+  finally { wsRemoveBusy.value = false }
 }
 // "Save to library" for one row or the whole selection — the server routes each item
 // (file -> track, link -> saved link), so per-row and bulk are the exact same call.
@@ -288,6 +297,21 @@ const selectedLocalItemIds = computed(() => chosen.value
   .filter((item) => (item.local_count || 0) > 0 || (item.relative_path && !item.is_download_file))
   .map((item) => item.id))
 const bulkDeleteLocal = () => previewWorkspaceLocal(selectedLocalItemIds.value)
+// Low-frequency bulk actions — on mobile these collapse into one "More" menu
+// (primary actions: Refresh, Export, Download audio, Remove stay inline everywhere).
+const { mobile } = useDisplay()
+const secondaryActions = computed(() => [
+  { key: 'add-files', icon: 'mdi-file-plus-outline', label: 'Add files', tooltip: 'Add files from disk (absolute path)', loading: picking.value, action: pickFiles },
+  { key: 'verify', icon: 'mdi-check-decagram-outline', label: 'Verify labels', tooltip: 'Verify labels — link health + local/download for selection (background)', loading: startingVerify.value, action: startVerifyLabels },
+  { key: 'find-local', icon: 'mdi-folder-search-outline', label: 'Find local file', tooltip: 'Find local file — missing/moved, auto-link (background)', loading: finding.value === 'local', disabled: busy.value, action: findLocal },
+  { key: 'find-youtube', icon: 'mdi-link-variant-plus', label: 'Find YouTube link', tooltip: 'Find YouTube link — missing/dead, auto-apply best (background)', loading: finding.value === 'youtube', disabled: busy.value, action: findYoutube },
+  { key: 'find-lyrics', icon: 'mdi-text-search', label: 'Find lyrics', tooltip: 'Find lyrics — fetch + store for selection (background)', loading: finding.value === 'lyrics', disabled: busy.value, action: findLyrics },
+  { key: 'find-metadata', icon: 'mdi-tag-search-outline', label: 'Find metadata', tooltip: 'Find metadata — apply best MusicBrainz match for selection (background)', loading: finding.value === 'metadata', disabled: busy.value, action: findMetadata },
+  { key: 'playlist', icon: 'mdi-playlist-play', label: 'Generate Playlist', disabled: busy.value, action: generatePlaylist },
+  { key: 'save-library', icon: 'mdi-bookmark-plus-outline', label: 'Save to Library', disabled: busy.value, action: () => saveToLibrary() },
+  { key: 'show-library', icon: 'mdi-library', label: 'Show in library', tooltip: 'Show selected in Library', disabled: !chosen.value.some((item) => item.track_id), action: () => showInLibrary(chosen.value.map((item) => item.track_id).filter(Boolean)) },
+  { key: 'delete-local', icon: 'mdi-broom', color: 'error', label: 'Delete local files', tooltip: `Delete local files on disk${selectedLocalItemIds.value.length ? ` · ${selectedLocalItemIds.value.length} selected` : ' — select items with a local file'}`, disabled: !selectedLocalItemIds.value.length, action: bulkDeleteLocal },
+])
 function labelsFor(item) {
   // A file ref in the download folder is a *download*, not an mp3-folder local/untracked
   // file (distinct — see CLAUDE.md). A direct file ref is "untracked" only when it has NO
@@ -311,7 +335,7 @@ function wsLocalSrc(item) {
 // action data. unreview patches track_check locally (labelsFor recomputes),
 // rereview routes through openReview above — both fixed once in useRowActions.
 function onLabel(row, label, ev) {
-  const target = [ev.clientX, ev.clientY]
+  const target = labelMenuTarget(ev)
   const item = row.raw
   if (label.key === 'youtube' || label.key === 'dead') ytMenu.value = { open: true, target, row, items: ytMenuItems(row.ytId, { canFindLocal: !(item.relative_path || item.local_count), canSetLocal: true }) }
   else if (label.key === 'local') fileMenu.value = { open: true, target, row, items: fileMenuItems({ deletable: true, source: 'local', canFindYoutube: !row.ytId, canSetYoutube: true, canEmbed: true }) }
@@ -425,33 +449,21 @@ onUnmounted(() => clearInterval(poll))
     <v-btn icon variant="text" :loading="loading" aria-label="Refresh" @click="load">
       <v-icon>mdi-refresh</v-icon><v-tooltip activator="parent" location="bottom">Refresh list</v-tooltip>
     </v-btn>
-    <v-btn icon variant="text" :loading="picking" aria-label="Add files" @click="pickFiles">
-      <v-icon>mdi-file-plus-outline</v-icon><v-tooltip activator="parent" location="bottom">Add files from disk (absolute path)</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" :loading="startingVerify" aria-label="Verify labels" @click="startVerifyLabels">
-      <v-icon>mdi-check-decagram-outline</v-icon><v-tooltip activator="parent" location="bottom">Verify labels — link health + local/download for selection (background)</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" :loading="finding === 'local'" :disabled="busy" aria-label="Find local file" @click="findLocal">
-      <v-icon>mdi-folder-search-outline</v-icon><v-tooltip activator="parent" location="bottom">Find local file — missing/moved, auto-link (background)</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" :loading="finding === 'youtube'" :disabled="busy" aria-label="Find YouTube link" @click="findYoutube">
-      <v-icon>mdi-link-variant-plus</v-icon><v-tooltip activator="parent" location="bottom">Find YouTube link — missing/dead, auto-apply best (background)</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" :loading="finding === 'lyrics'" :disabled="busy" aria-label="Find lyrics" @click="findLyrics">
-      <v-icon>mdi-text-search</v-icon><v-tooltip activator="parent" location="bottom">Find lyrics — fetch + store for selection (background)</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" :loading="finding === 'metadata'" :disabled="busy" aria-label="Find metadata" @click="findMetadata">
-      <v-icon>mdi-tag-search-outline</v-icon><v-tooltip activator="parent" location="bottom">Find metadata — apply best MusicBrainz match for selection (background)</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" :disabled="busy" aria-label="Generate Playlist" @click="generatePlaylist">
-      <v-icon>mdi-playlist-play</v-icon><v-tooltip activator="parent" location="bottom">Generate Playlist</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" :disabled="busy" aria-label="Save to Library" @click="saveToLibrary()">
-      <v-icon>mdi-bookmark-plus-outline</v-icon><v-tooltip activator="parent" location="bottom">Save to Library</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" :disabled="!chosen.some((item) => item.track_id)" aria-label="Show in library" @click="showInLibrary(chosen.map((item) => item.track_id).filter(Boolean))">
-      <v-icon>mdi-library</v-icon><v-tooltip activator="parent" location="bottom">Show selected in Library</v-tooltip>
-    </v-btn>
+    <template v-for="a in secondaryActions" :key="a.key">
+      <v-btn v-if="!mobile" icon variant="text" :color="a.color" :loading="a.loading" :disabled="a.disabled" :aria-label="a.label" @click="a.action">
+        <v-icon>{{ a.icon }}</v-icon><v-tooltip activator="parent" location="bottom">{{ a.tooltip || a.label }}</v-tooltip>
+      </v-btn>
+    </template>
+    <v-menu v-if="mobile">
+      <template #activator="{ props }">
+        <v-btn icon variant="text" aria-label="More actions" v-bind="props">
+          <v-icon>mdi-dots-vertical</v-icon><v-tooltip activator="parent" location="bottom">More actions</v-tooltip>
+        </v-btn>
+      </template>
+      <v-list density="compact">
+        <v-list-item v-for="a in secondaryActions" :key="a.key" :prepend-icon="a.icon" :title="a.label" :disabled="a.disabled" :base-color="a.color" @click="a.action" />
+      </v-list>
+    </v-menu>
     <v-menu>
       <template #activator="{ props }">
         <v-btn icon variant="text" :disabled="busy" aria-label="Export" v-bind="props">
@@ -468,10 +480,7 @@ onUnmounted(() => clearInterval(poll))
     <v-btn icon variant="text" color="primary" :loading="working === 'Starting audio download'" :disabled="busy" aria-label="Download audio" @click="bulkFmt = true">
       <v-icon>mdi-download</v-icon><v-tooltip activator="parent" location="bottom">Download audio (choose format)</v-tooltip>
     </v-btn>
-    <v-btn icon variant="text" color="error" :disabled="!selectedLocalItemIds.length" aria-label="Delete local files" @click="bulkDeleteLocal">
-      <v-icon>mdi-broom</v-icon><v-tooltip activator="parent" location="bottom">Delete local files on disk{{ selectedLocalItemIds.length ? ` · ${selectedLocalItemIds.length} selected` : ' — select items with a local file' }}</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" color="error" :disabled="busy" aria-label="Remove" @click="removeItems(selected)">
+    <v-btn icon variant="text" color="error" :disabled="busy" aria-label="Remove" @click="askRemoveItems(selected)">
       <v-icon>mdi-delete-outline</v-icon><v-tooltip activator="parent" location="bottom">Remove</v-tooltip>
     </v-btn>
     <v-text-field v-model="query" placeholder="Search title, channel, ID…" density="compact" variant="solo-filled" flat hide-details clearable prepend-inner-icon="mdi-magnify" class="mx-2" style="flex:1 1 auto" />
@@ -486,7 +495,8 @@ onUnmounted(() => clearInterval(poll))
     </v-menu>
   </v-toolbar>
 
-  <CurationList
+  <div v-if="loading" class="pa-12 text-center"><v-progress-circular indeterminate color="primary" /></div>
+  <CurationList v-else
     :rows="listRows" :selected="selected" :preview-for="preview.previewFor"
     v-model:page="page" v-model:per-page="perPage" :page-count="pageCount" :has-items="items.length > 0"
     @toggle="(row) => toggle(row.key)" @label="onLabel">
@@ -524,6 +534,12 @@ onUnmounted(() => clearInterval(poll))
   <ConfirmDialog :model-value="!!libRemoveConfirm" title="Remove from Library?" confirm-label="Remove" @update:model-value="(v) => { if (!v) libRemoveConfirm = null }" @confirm="async () => { const id = libRemoveConfirm.trackId; libRemoveConfirm = null; try { await api.libraryRemove([id]); invalidateData(); await load() } catch (e) { error.value = String(e) } }">
     Deletes the Library entry and any downloaded file(s). Your mp3-folder files are not touched. This item stays in the Workspace.
   </ConfirmDialog>
+  <ConfirmDialog :model-value="!!wsRemoveConfirm && wsRemoveConfirm.count === 1" title="Remove from Workspace?" confirm-label="Remove" :loading="wsRemoveBusy" @update:model-value="(v) => { if (!v) wsRemoveConfirm = null }" @confirm="confirmRemoveItems">
+    Removes the item from the Workspace. Library entries and files are not touched.
+  </ConfirmDialog>
+  <TypedConfirmDialog :model-value="!!wsRemoveConfirm && wsRemoveConfirm.count > 1" :title="`Remove ${wsRemoveConfirm?.count} from Workspace?`" confirm-label="Remove" :loading="wsRemoveBusy" @update:model-value="(v) => { if (!v) wsRemoveConfirm = null }" @confirm="confirmRemoveItems">
+    Removes the selected items from the Workspace. Library entries and files are not touched.
+  </TypedConfirmDialog>
 
   <v-dialog v-model="dialog" max-width="760" scrollable>
     <v-card>
@@ -561,3 +577,10 @@ onUnmounted(() => clearInterval(poll))
     </v-card>
   </v-dialog>
 </template>
+
+<style scoped>
+/* Coarse pointers (touch) get a >=44px tap target on toolbar icon buttons. */
+@media (pointer: coarse) {
+  .responsive-toolbar :deep(.v-btn--icon) { width: 44px; height: 44px; }
+}
+</style>

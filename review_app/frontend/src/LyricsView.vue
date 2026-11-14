@@ -24,7 +24,8 @@ watch(active, async (i) => {
   if (i < 0 || !container.value) return
   await nextTick()
   const el = container.value.querySelector(`[data-line="${i}"]`)
-  if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  const reduceMotion = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  if (el) el.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' })
 })
 
 const editing = ref(false)

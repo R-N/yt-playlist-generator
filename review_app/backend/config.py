@@ -1,8 +1,13 @@
 """Paths and settings for the review app. Edit here, not in code."""
 import os
+import sys
 
 # Repo root (two levels up from this file: review_app/backend/ -> repo)
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+if REPO_ROOT not in sys.path:            # reuse the repo-root scripts' folder defaults (no duplication)
+    sys.path.insert(0, REPO_ROOT)
+from folder_config import DEFAULT_MP3_FOLDERS   # noqa: E402  (path set above)
 
 # Live store (SQLite) and the CSV/XLSX it imports from / exports to
 DB_PATH = os.path.join(os.path.dirname(__file__), "review.db")
@@ -22,11 +27,7 @@ MATCHES_SOURCE = MATCHES_XLSX
 AUTO_EXPORT_EVERY = 25
 
 # Folders holding the local mp3 files (read-only; the app never writes here)
-MP3_FOLDERS = [
-    "E:/Music/My Music",
-    "E:/Music/My Music Out 2",
-    "E:/Music/downloads",
-]
+MP3_FOLDERS = list(DEFAULT_MP3_FOLDERS)
 
 # Columns carried from matches.csv into the tracks table, in order.
 TRACK_COLUMNS = [

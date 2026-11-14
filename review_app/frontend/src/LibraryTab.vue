@@ -1,10 +1,11 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useDisplay } from 'vuetify'
 import { api } from './api'
 import { reviewTrack, activeTab, invalidateData, libraryFocusIds, useTabRefresh } from './nav'
 import { formatBytes } from './workspace'
 import { buildLabels, FILTER_ATTRS, matchesLabelFilter } from './labels'
-import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, useAudioDownload, useLocalDelete, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, untrackedMenuItems, libraryLabelMenu, workspaceLabelMenu, fileMenuItems, downloadMenuItems, withNewBase } from './curation'
+import { useLabelFilter, usePagination, useSelection, useRowActions, useFilePicker, useMembershipActions, useSearchPicker, useForceSet, useAudioDownload, useLocalDelete, ytUrl, ytMenuItems, YT_MENU_ITEMS, STATUS_MENU_ITEMS, untrackedMenuItems, libraryLabelMenu, workspaceLabelMenu, fileMenuItems, downloadMenuItems, withNewBase, labelMenuTarget } from './curation'
 import CurationList from './CurationList.vue'
 import VerifyScopeDialog from './VerifyScopeDialog.vue'
 import LabelFilterMenu from './LabelFilterMenu.vue'
@@ -252,7 +253,7 @@ function localSrc(e) {
   return null
 }
 function onLabel(row, label, ev) {
-  const target = [ev.clientX, ev.clientY]
+  const target = labelMenuTarget(ev)
   if (label.key === 'youtube' || label.key === 'dead') { ytMenuState.value = { items: ytMenuItems(row.ytId, { canFindLocal: row.kind === 'track' && !row.raw.has_local, canSetLocal: row.kind === 'track' }) }; ytMenu.value = { open: true, target, row } }
   else if (label.key === 'local') fileMenu.value = { open: true, target, row, source: 'local', items: fileMenuItems({ deletable: true, source: 'local', canFindYoutube: row.kind === 'track' && !row.ytId, canSetYoutube: row.kind === 'track', canEmbed: row.kind === 'track' }) }
   else if (label.key === 'downloaded') fileMenu.value = { open: true, target, row, source: 'download', items: downloadMenuItems({ deletable: true }) }
@@ -349,6 +350,17 @@ async function addSelectedFiles() {
   catch (e) { error.value = String(e) } finally { addingFiles.value = false }
 }
 const previewDelete = () => previewLocal(deletable.value.map((row) => row.id))
+// Low-frequency bulk actions — on mobile these collapse into one "More" menu
+// (primary actions: Refresh, Remove from Library stay inline everywhere).
+const { mobile } = useDisplay()
+const secondaryActions = computed(() => [
+  { key: 'add-files', icon: 'mdi-file-plus-outline', label: 'Add files', tooltip: 'Add files from disk as tracks (absolute path)', loading: picking.value, action: pickFiles },
+  { key: 'verify', icon: 'mdi-check-decagram-outline', label: 'Verify labels', tooltip: 'Verify labels — link health + local/download for selection (background)', loading: verifying.value, action: startVerifyLabels },
+  (selectedTrackIds.value.length || selectedFileRefs.value.length) ? { key: 'send', icon: 'mdi-send', color: 'primary', label: 'Send to Workspace', tooltip: `Send ${selectedTrackIds.value.length + selectedFileRefs.value.length} to Workspace`, loading: addingFiles.value, action: sendSelectionToWorkspace } : null,
+  selectedFileRefs.value.length ? { key: 'add-selected-files', icon: 'mdi-plus-box-multiple', color: 'primary', label: 'Add files to Library', tooltip: `Add ${selectedFileRefs.value.length} files to Library`, loading: addingFiles.value, action: addSelectedFiles } : null,
+  deletable.value.length ? { key: 'delete-local', icon: 'mdi-broom', color: 'error', label: 'Delete approved local files', tooltip: `Delete ${deletable.value.length} approved local files (disk)`, action: previewDelete } : null,
+  (fileCount.value && !selected.value.length) ? { key: 'add-untracked', icon: 'mdi-plus-box-multiple', color: 'primary', label: 'Add all untracked to Library', tooltip: `Add ${fileCount.value} to Library`, loading: addingFiles.value, action: addAllUntracked } : null,
+].filter(Boolean))
 async function matchSavedLink() {
   if (!matchingLink.value || !matchFile.value?.tracks?.length) return
   const track = matchFile.value.tracks[0]
@@ -369,21 +381,21 @@ useTabRefresh('library', load)
     <v-btn icon variant="text" :loading="loading" aria-label="Refresh" @click="load">
       <v-icon>mdi-refresh</v-icon><v-tooltip activator="parent" location="bottom">Refresh list</v-tooltip>
     </v-btn>
-    <v-btn icon variant="text" :loading="picking" aria-label="Add files" @click="pickFiles">
-      <v-icon>mdi-file-plus-outline</v-icon><v-tooltip activator="parent" location="bottom">Add files from disk as tracks (absolute path)</v-tooltip>
-    </v-btn>
-    <v-btn icon variant="text" :loading="verifying" aria-label="Verify labels" @click="startVerifyLabels">
-      <v-icon>mdi-check-decagram-outline</v-icon><v-tooltip activator="parent" location="bottom">Verify labels — link health + local/download for selection (background)</v-tooltip>
-    </v-btn>
-    <v-btn v-if="selectedTrackIds.length || selectedFileRefs.length" icon color="primary" variant="text" :loading="addingFiles" aria-label="Send to Workspace" @click="sendSelectionToWorkspace">
-      <v-icon>mdi-send</v-icon><v-tooltip activator="parent" location="bottom">Send {{ selectedTrackIds.length + selectedFileRefs.length }} to Workspace</v-tooltip>
-    </v-btn>
-    <v-btn v-if="selectedFileRefs.length" icon color="primary" variant="text" :loading="addingFiles" aria-label="Add files to Library" @click="addSelectedFiles">
-      <v-icon>mdi-plus-box-multiple</v-icon><v-tooltip activator="parent" location="bottom">Add {{ selectedFileRefs.length }} files to Library</v-tooltip>
-    </v-btn>
-    <v-btn v-if="deletable.length" icon color="error" variant="text" aria-label="Delete approved local files" @click="previewDelete">
-      <v-icon>mdi-broom</v-icon><v-tooltip activator="parent" location="bottom">Delete {{ deletable.length }} approved local files (disk)</v-tooltip>
-    </v-btn>
+    <template v-for="a in secondaryActions" :key="a.key">
+      <v-btn v-if="!mobile" icon :color="a.color" variant="text" :loading="a.loading" :disabled="a.disabled" :aria-label="a.label" @click="a.action">
+        <v-icon>{{ a.icon }}</v-icon><v-tooltip activator="parent" location="bottom">{{ a.tooltip || a.label }}</v-tooltip>
+      </v-btn>
+    </template>
+    <v-menu v-if="mobile && secondaryActions.length">
+      <template #activator="{ props }">
+        <v-btn icon variant="text" aria-label="More actions" v-bind="props">
+          <v-icon>mdi-dots-vertical</v-icon><v-tooltip activator="parent" location="bottom">More actions</v-tooltip>
+        </v-btn>
+      </template>
+      <v-list density="compact">
+        <v-list-item v-for="a in secondaryActions" :key="a.key" :prepend-icon="a.icon" :title="a.label" :disabled="a.disabled" :base-color="a.color" @click="a.action" />
+      </v-list>
+    </v-menu>
     <v-btn v-if="selectedTrackIds.length" icon color="error" variant="text" aria-label="Remove from Library" @click="askRemove(selectedTrackIds)">
       <v-icon>mdi-delete-outline</v-icon><v-tooltip activator="parent" location="bottom">Remove {{ selectedTrackIds.length }} from Library</v-tooltip>
     </v-btn>
@@ -443,7 +455,17 @@ useTabRefresh('library', load)
     Deletes the file in your download folder. The Library entry and any mp3-folder file stay.
   </ConfirmDialog>
 
-  <ConfirmDialog :model-value="!!removeConfirm" :title="`Remove ${removeConfirm?.count} from Library?`" confirm-label="Remove" :loading="removing" @update:model-value="(v) => { if (!v) removeConfirm = null }" @confirm="confirmRemove">
-    Deletes the Library {{ removeConfirm?.count === 1 ? 'entry' : 'entries' }} and any downloaded file(s). Your mp3-folder files are not touched. This can't be undone.
+  <ConfirmDialog :model-value="!!removeConfirm && removeConfirm.count === 1" title="Remove from Library?" confirm-label="Remove" :loading="removing" @update:model-value="(v) => { if (!v) removeConfirm = null }" @confirm="confirmRemove">
+    Deletes the Library entry and any downloaded file(s). Your mp3-folder files are not touched. This can't be undone.
   </ConfirmDialog>
+  <TypedConfirmDialog :model-value="!!removeConfirm && removeConfirm.count > 1" :title="`Remove ${removeConfirm?.count} from Library?`" confirm-label="Remove" :loading="removing" @update:model-value="(v) => { if (!v) removeConfirm = null }" @confirm="confirmRemove">
+    Deletes the Library entries and any downloaded file(s). Your mp3-folder files are not touched. This can't be undone.
+  </TypedConfirmDialog>
 </template>
+
+<style scoped>
+/* Coarse pointers (touch) get a >=44px tap target on toolbar icon buttons. */
+@media (pointer: coarse) {
+  .responsive-toolbar :deep(.v-btn--icon) { width: 44px; height: 44px; }
+}
+</style>

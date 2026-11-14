@@ -113,11 +113,12 @@ FORCE_WAIT = 1
 # Child entry point: runs the script unchanged as __main__ (argv, cwd, exit code as with
 # `python script.py`), but it dies with the app. stdin is a pipe the app never writes;
 # when the app process dies (crash, kill, Ctrl+C, reload) the OS closes it and the read
-# ends (EOF on POSIX, BrokenPipeError on Windows). The child then kills its process group
-# on POSIX (yt-dlp's ffmpeg included) or itself on Windows. Otherwise an orphan keeps
-# downloading while the recovered app resumes the same run over its files.
-# Raw os.read, not sys.stdin: a daemon thread parked in the buffered reader holds its lock
-# and aborts the interpreter at a normal exit.
+# ends (EOF on POSIX, BrokenPipeError on Windows). On POSIX the child then kills its own
+# process group (yt-dlp's ffmpeg included). On Windows killpg doesn't exist, so the child
+# only kills itself here; the launcher instead puts the app process in a kill-on-close Job
+# Object (see _assign_windows_job / run() below) so the OS tears down the whole tree the
+# moment the app's last handle to it disappears. Otherwise an orphan keeps downloading
+# while the recovered app resumes the same run over its files.
 _RUNNER = (
     "import os, runpy, signal, sys, threading\n"
     "def _die_with_parent():\n"
@@ -134,6 +135,62 @@ _RUNNER = (
     "sys.path[0] = os.path.dirname(os.path.abspath(sys.argv[0]))\n"
     "runpy.run_path(sys.argv[0], run_name='__main__')\n"
 )
+
+
+def _assign_windows_job(proc):
+    """Best-effort: put the child in a Job Object with kill-on-close so Windows tears
+    down the whole tree (yt-dlp's ffmpeg included) the instant this app's handle to the
+    job disappears. Belt-and-suspenders for the _RUNNER pipe trick, which on Windows
+    only kills the immediate child (no os.killpg there). Returns the job handle, which
+    the caller must keep alive for the child's lifetime, or raises on any failure.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    JobObjectExtendedLimitInformation = 9
+
+    class _BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint64) for n in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    class _ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimits),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateJobObjectW(None, None)
+    if not handle:
+        raise ctypes.WinError()
+    info = _ExtendedLimits()
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    ok = kernel32.SetInformationJobObject(
+        handle, JobObjectExtendedLimitInformation,
+        ctypes.byref(info), ctypes.sizeof(info))
+    if not ok or not kernel32.AssignProcessToJobObject(handle, int(proc._handle)):
+        kernel32.CloseHandle(handle)
+        raise ctypes.WinError()
+    return handle
 
 
 def _job(name):
@@ -262,7 +319,14 @@ def start(name, args=None, prepare=None, finalize=None, curation=False,
         failed = False
         stopped = False
         exited = False
+        win_job_handle = None
         try:
+            # Stop arrived before launch: never spawn. The finally block sees no
+            # child, sets proc_exited, finalizes, and reports "stopped" at once.
+            with job.lock:
+                if job.stop_requested:
+                    job.lines.append("[stopped before launch]")
+                    return
             popen_options = {"start_new_session": True} if os.name != "nt" else {
                 "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             }
@@ -275,6 +339,12 @@ def start(name, args=None, prepare=None, finalize=None, curation=False,
                 text=True, bufsize=1,
                 **popen_options,
             )
+            if os.name == "nt":
+                try:
+                    win_job_handle = _assign_windows_job(job.proc)
+                except Exception as e:
+                    with job.lock:
+                        job.lines.append(f"[job object error] {e}")
             with job.lock:
                 should_stop = job.stop_requested
             if should_stop and job.proc.poll() is None:
@@ -344,6 +414,12 @@ def start(name, args=None, prepare=None, finalize=None, curation=False,
             else:
                 with job.lock:
                     job.status = "failed"   # reached only when the child never exited
+            if win_job_handle is not None:
+                try:
+                    import ctypes
+                    ctypes.windll.kernel32.CloseHandle(win_job_handle)
+                except Exception:
+                    pass
             for stream in (getattr(job.proc, "stdout", None), getattr(job.proc, "stdin", None)):
                 if stream is not None:
                     try:
